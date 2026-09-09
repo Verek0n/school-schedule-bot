@@ -1,0 +1,62 @@
+name: Check school schedule
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: school-schedule-bot
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Download project
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Disable unnecessary Google Chrome repository
+        run: |
+          for f in /etc/apt/sources.list.d/*; do
+            if [ -f "$f" ] && grep -q "dl.google.com/linux/chrome" "$f"; then
+              sudo rm -f "$f"
+            fi
+          done
+
+      - name: Install LibreOffice and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             libreoffice-writer             fonts-liberation             fonts-crosextra-carlito             fonts-crosextra-caladea
+
+      - name: Install Python libraries and browser
+        run: |
+          python -m pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Check document and send schedule
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
+          STATE_REPO: ${{ secrets.STATE_REPO }}
+        run: python bot.py
+
+      - name: Save download diagnostic screenshot
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: download-diagnostic
+          path: work/download-error.png
+          if-no-files-found: ignore
+          retention-days: 2
