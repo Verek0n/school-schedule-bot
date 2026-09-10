@@ -215,7 +215,7 @@ def process_commands(state):
                     subscribers.pop(chat_id, None)
                     safe_say(
                         chat_id,
-                        "Вы отписались от расписания.\n"
+                        "Вы отписались от расписания\n"
                         "Чтобы подписаться снова: /start",
                     )
 
@@ -431,7 +431,7 @@ def broadcast(state, png):
         data = {
             "chat_id": chat_id,
             "caption": (
-                "Последняя обнаруженная версия расписания 10Б\n\n"
+                "Доступно новое расписание для 10'Б'\n\n"
             ),
         }
 
