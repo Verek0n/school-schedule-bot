@@ -431,7 +431,7 @@ def broadcast(state, png):
         data = {
             "chat_id": chat_id,
             "caption": (
-                "Доступно новое расписание для 10'Б'\n\n"
+                "Доступно новое расписание\n\n"
             ),
         }
 
