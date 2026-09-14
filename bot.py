@@ -20,7 +20,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 SOURCE_URL = (
     "https://disk.yandex.ru/i/"
-    "https://docs.yandex.ru/view/d/zQH249qvBK21O7SXl-9z_SPegnqahzm72s0qoIz-cKg6eG1uRGNFdE5adw"
+    "YOUR_YANDEX_LINK"
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -358,4 +358,1039 @@ def get_updates(offset):
             "limit": 100,
             "timeout": 0,
             "allowed_updates": json.dumps(
+                ["message"]
+            ),
+        },
+    )
+
+
+def process_commands(state):
+    """
+    Обрабатывает входящие сообщения Telegram.
+
+    Возвращает:
+        changed = True/False
+    """
+
+    changed = False
+
+    for batch_number in range(10):
+        updates = get_updates(state["offset"])
+
+        if not updates:
+            break
+
+        for update in updates:
+            state["offset"] = (
+                update["update_id"] + 1
+            )
+
+            message = update.get("message")
+
+            if not message:
+                continue
+
+            chat = message.get("chat", {})
+            chat_id = chat.get("id")
+
+            if chat.get("type") != "private":
+                continue
+
+            text = (
+                message.get("text") or ""
+            ).strip()
+
+            if not text:
+                continue
+
+            print(
+                f"Получено сообщение "
+                f"от {chat_id}: {text}"
+            )
+
+            user_key = str(chat_id)
+
+            # ------------------------------------------------
+            # /start
+            # ------------------------------------------------
+
+            if text == "/start":
+                if user_key not in state["users"]:
+                    state["users"][user_key] = {
+                        "class": None,
+                        "sent": None,
+                        "want_schedule": False,
+                    }
+                    changed = True
+
+                current_class = (
+                    state["users"][user_key]
+                    .get("class")
+                )
+
+                if current_class:
+                    send_message(
+                        chat_id,
+                        (
+                            f"Текущий класс: "
+                            f"{current_class}\n\n"
+                            "Выберите класс кнопкой ниже."
+                        ),
+                        class_keyboard(),
+                    )
+                else:
+                    send_message(
+                        chat_id,
+                        (
+                            "Выберите свой класс:"
+                        ),
+                        class_keyboard(),
+                    )
+
+                continue
+
+            # ------------------------------------------------
+            # /stop
+            # ------------------------------------------------
+
+            if text == "/stop":
+                if user_key in state["users"]:
+                    del state["users"][user_key]
+                    changed = True
+
+                send_message(
+                    chat_id,
+                    "Вы больше не получаете расписание.",
+                    REMOVE_KEYBOARD,
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # /class
+            # ------------------------------------------------
+
+            if text == "/class":
+                send_message(
+                    chat_id,
+                    "Выберите класс:",
+                    class_keyboard(),
+                )
+                continue
+
+            # ------------------------------------------------
+            # /schedule
+            # ------------------------------------------------
+
+            if text == "/schedule":
+                if user_key not in state["users"]:
+                    state["users"][user_key] = {
+                        "class": None,
+                        "sent": None,
+                        "want_schedule": False,
+                    }
+                    changed = True
+
+                user = state["users"][user_key]
+
+                if not user.get("class"):
+                    send_message(
+                        chat_id,
+                        "Сначала выберите класс:",
+                        class_keyboard(),
+                    )
+                else:
+                    user["want_schedule"] = True
+                    changed = True
+
+                    send_message(
+                        chat_id,
+                        (
+                            "Запрос на расписание принят. "
+                            "Оно будет отправлено "
+                            "при ближайшем запуске."
+                        ),
+                    )
+
+                continue
+
+            # ------------------------------------------------
+            # CLASS BUTTON
+            # ------------------------------------------------
+
+            if text in CLASS_TO_SLIDE:
+                if user_key not in state["users"]:
+                    state["users"][user_key] = {
+                        "class": None,
+                        "sent": None,
+                        "want_schedule": False,
+                    }
+
+                user = state["users"][user_key]
+
+                old_class = user.get("class")
+
+                user["class"] = text
+
+                # Обязательно отправить новое расписание
+                user["sent"] = None
+                user["want_schedule"] = True
+
+                changed = True
+
+                print(
+                    f"Пользователь {chat_id} "
+                    f"выбрал класс {text} "
+                    f"(было: {old_class})"
+                )
+
+                send_message(
+                    chat_id,
+                    (
+                        f"Класс выбран: «{text}».\n"
+                        "Расписание будет отправлено "
+                        "при ближайшем запуске."
+                    ),
+                    class_keyboard(),
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # UNKNOWN
+            # ------------------------------------------------
+
+            send_message(
+                chat_id,
+                (
+                    "Используйте кнопки для выбора класса.\n\n"
+                    "/schedule — получить расписание\n"
+                    "/class — выбрать другой класс\n"
+                    "/stop — отключить рассылку"
+                ),
+                class_keyboard(),
+            )
+
+    return changed
+
+
+# ============================================================
+# YANDEX DOCX DOWNLOAD
+# ============================================================
+
+def find_download_control(page):
+    """
+    Ищет кнопку/ссылку скачивания DOCX.
+
+    Используется логика из старого рабочего bot.py:
+    ищем как по английским, так и по русским словам,
+    включая iframe/frame.
+    """
+
+    patterns = [
+        re.compile(r"docx|word", re.I),
+        re.compile(
+            r"скачать|download|загрузить\s+на\s+компьютер",
+            re.I,
+        ),
+    ]
+
+    roots = [page]
+
+    try:
+        roots.extend(page.frames)
+    except Exception:
+        pass
+
+    for root in roots:
+        for pattern in patterns:
+
+            # menuitem
+            try:
+                locator = root.get_by_role(
+                    "menuitem",
+                    name=pattern,
+                )
+
+                count = locator.count()
+
+                for i in range(count):
+                    item = locator.nth(i)
+
+                    try:
+                        if item.is_visible() and item.is_enabled():
+                            return item
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # button
+            try:
+                locator = root.get_by_role(
+                    "button",
+                    name=pattern,
+                )
+
+                count = locator.count()
+
+                for i in range(count):
+                    item = locator.nth(i)
+
+                    try:
+                        if item.is_visible() and item.is_enabled():
+                            return item
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # link
+            try:
+                locator = root.get_by_role(
+                    "link",
+                    name=pattern,
+                )
+
+                count = locator.count()
+
+                for i in range(count):
+                    item = locator.nth(i)
+
+                    try:
+                        if item.is_visible() and item.is_enabled():
+                            return item
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # title
+            try:
+                locator = root.get_by_title(pattern)
+
+                count = locator.count()
+
+                for i in range(count):
+                    item = locator.nth(i)
+
+                    try:
+                        if item.is_visible() and item.is_enabled():
+                            return item
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+            # aria-label
+            try:
+                locator = root.get_by_label(pattern)
+
+                count = locator.count()
+
+                for i in range(count):
+                    item = locator.nth(i)
+
+                    try:
+                        if item.is_visible() and item.is_enabled():
+                            return item
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+    return None
+
+
+def download_docx():
+    """
+    Скачивает DOCX с Яндекс.Диска через Chromium/Playwright.
+    """
+
+    target = WORK / "source.docx"
+
+    # Удаляем старый файл, чтобы не принять его
+    # за новый скачанный документ.
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        pass
+
+    print("Скачивание расписания...")
+
+    with sync_playwright() as p:
+        browser = None
+
+        try:
+            browser = p.chromium.launch(
+                headless=True
+            )
+
+            context = browser.new_context(
+                accept_downloads=True,
+                locale="ru-RU",
+                viewport={
+                    "width": 1600,
+                    "height": 1100,
+                },
+            )
+
+            page = context.new_page()
+
+            print("Открываем страницу расписания...")
+
+            page.goto(
+                SOURCE_URL,
+                wait_until="domcontentloaded",
+                timeout=90000,
+            )
+
+            # Яндекс может догружать интерфейс после DOM.
+            page.wait_for_timeout(12000)
+
+            for attempt in range(4):
+                print(
+                    f"Поиск кнопки скачивания "
+                    f"(попытка {attempt + 1}/4)..."
+                )
+
+                control = find_download_control(page)
+
+                if control is None:
+                    print(
+                        "Кнопка скачивания пока не найдена."
+                    )
+
+                    page.wait_for_timeout(4000)
+                    continue
+
+                print("Кнопка скачивания найдена.")
+
+                try:
+                    with page.expect_download(
+                        timeout=30000
+                    ) as download_info:
+
+                        control.click(
+                            timeout=10000
+                        )
+
+                    download = download_info.value
+
+                    failure = download.failure()
+
+                    if failure:
+                        raise RuntimeError(
+                            f"Ошибка скачивания: {failure}"
+                        )
+
+                    download.save_as(target)
+
+                    print(
+                        f"DOCX скачан: {target}"
+                    )
+
+                    break
+
+                except PlaywrightTimeoutError:
+                    print(
+                        "Ожидание скачивания "
+                        "завершилось таймаутом."
+                    )
+
+                    page.wait_for_timeout(2000)
+
+            if not target.exists():
+                # Сохраняем скриншот для диагностики.
+                try:
+                    page.screenshot(
+                        path=str(
+                            WORK / "download-error.png"
+                        ),
+                        full_page=True,
+                    )
+                except Exception:
+                    pass
+
+                raise RuntimeError(
+                    "Не удалось скачать DOCX."
+                )
+
+        finally:
+            if browser is not None:
+                browser.close()
+
+    # Проверяем, что это действительно DOCX.
+    try:
+        with zipfile.ZipFile(target) as z:
+            names = set(z.namelist())
+
+            if "word/document.xml" not in names:
+                raise RuntimeError(
+                    "Скачанный файл не является "
+                    "корректным DOCX."
+                )
+
+    except zipfile.BadZipFile:
+        raise RuntimeError(
+            "Скачанный файл повреждён "
+            "или это не DOCX."
+        )
+
+    print("DOCX успешно проверен.")
+
+    return target
+
+
+# ============================================================
+# DOCX -> PDF -> 5 PNG
+# ============================================================
+
+def make_schedule(docx_path):
+    """
+    Конвертирует DOCX в PDF и берёт первые 5 страниц
+    как 5 отдельных слайдов.
+    """
+
+    pdf_path = WORK / "source.pdf"
+
+    print("Конвертация DOCX -> PDF...")
+
+    profile = (
+        "file:///tmp/"
+        f"school-lo-profile-{os.getpid()}"
+    )
+
+    command = [
+        "libreoffice",
+        f"-env:UserInstallation={profile}",
+        "--headless",
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(WORK),
+        str(docx_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "LibreOffice не смог конвертировать DOCX.\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+    if not pdf_path.exists():
+        raise RuntimeError(
+            "PDF после конвертации не найден."
+        )
+
+    print("PDF создан.")
+
+    doc = pymupdf.open(pdf_path)
+
+    try:
+        page_count = len(doc)
+
+        print(
+            f"В PDF найдено страниц: {page_count}"
+        )
+
+        if page_count < 5:
+            raise RuntimeError(
+                f"Ожидалось минимум 5 страниц, "
+                f"получено {page_count}."
+            )
+
+        slides = []
+
+        for slide_number in range(1, 6):
+            page_index = slide_number - 1
+
+            page = doc[page_index]
+
+            # DPI примерно 150.
+            matrix = pymupdf.Matrix(
+                150 / 72,
+                150 / 72,
+            )
+
+            pix = page.get_pixmap(
+                matrix=matrix,
+                alpha=False,
+                colorspace=pymupdf.csRGB,
+            )
+
+            png_path = (
+                WORK /
+                f"slide_{slide_number}.png"
+            )
+
+            pix.save(str(png_path))
+
+            image_bytes = png_path.read_bytes()
+
+            image_hash = hashlib.sha256(
+                image_bytes
+            ).hexdigest()
+
+            slides.append(
+                {
+                    "number": slide_number,
+                    "path": png_path,
+                    "hash": image_hash,
+                }
+            )
+
+            print(
+                f"Слайд {slide_number}: "
+                f"{png_path.name}, "
+                f"hash={image_hash[:12]}"
+            )
+
+        return slides
+
+    finally:
+        doc.close()
+
+
+# ============================================================
+# SEND ONE SLIDE
+# ============================================================
+
+def send_slide(
+    chat_id,
+    slide_number,
+    slide_path,
+    file_id=None,
+    caption=None,
+):
+    """
+    Если есть Telegram file_id — повторно загружать PNG
+    не нужно.
+    """
+
+    if file_id:
+        result = send_photo(
+            chat_id,
+            file_id=file_id,
+            caption=caption,
+        )
+    else:
+        result = send_photo(
+            chat_id,
+            photo_path=slide_path,
+            caption=caption,
+        )
+
+    return result
+
+
+# ============================================================
+# BROADCAST
+# ============================================================
+
+def broadcast(state, slides, schedule_changed):
+    """
+    Рассылает расписание только нужным пользователям.
+
+    Если пользователь выбрал класс:
+        want_schedule=True
+        -> получает расписание.
+
+    Если расписание изменилось:
+        пользователи, которым уже отправлялся этот слайд,
+        получают новую версию.
+
+    Telegram file_id кешируется в state.json.
+    """
+
+    users = state["users"]
+
+    old_slides = state["latest"]["slides"]
+
+    # --------------------------------------------------------
+    # Обновляем информацию о 5 слайдах
+    # --------------------------------------------------------
+
+    for slide in slides:
+        number = slide["number"]
+        index = number - 1
+
+        old = old_slides[index]
+
+        if old.get("hash") == slide["hash"]:
+            # Слайд не изменился.
+            # Старый Telegram file_id сохраняем.
+            continue
+
+        # Слайд новый/изменённый.
+        old["hash"] = slide["hash"]
+
+        # Старый file_id относится к старой картинке.
+        old["file_id"] = None
+
+    # --------------------------------------------------------
+    # Отправка пользователям
+    # --------------------------------------------------------
+
+    for user_key, user in list(users.items()):
+        try:
+            chat_id = int(user_key)
+
+            selected_class = user.get("class")
+
+            if not selected_class:
+                continue
+
+            slide_number = CLASS_TO_SLIDE.get(
+                selected_class
+            )
+
+            if not slide_number:
+                continue
+
+            index = slide_number - 1
+
+            current_slide = slides[index]
+
+            current_hash = current_slide["hash"]
+
+            old_user_hash = user.get("sent")
+
+            want_schedule = bool(
+                user.get("want_schedule")
+            )
+
+            # ------------------------------------------------
+            # Нужно ли отправлять?
+            # ------------------------------------------------
+
+            should_send = False
+
+            # Пользователь только выбрал класс
+            # или запросил /schedule.
+            if want_schedule:
+                should_send = True
+
+            # Слайд изменился после предыдущей отправки.
+            elif (
+                schedule_changed
+                and old_user_hash != current_hash
+            ):
+                should_send = True
+
+            if not should_send:
+                continue
+
+            cached_file_id = (
+                state["latest"]["slides"][index]
+                .get("file_id")
+            )
+
+            caption = (
+                f"Расписание «{selected_class}»"
+            )
+
+            # ------------------------------------------------
+            # Если есть file_id — отправляем его.
+            # Если нет — загружаем PNG.
+            # ------------------------------------------------
+
+            if cached_file_id:
+                result = send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=cached_file_id,
+                    caption=caption,
+                )
+
+            else:
+                result = send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=None,
+                    caption=caption,
+                )
+
+                # Получаем file_id из Telegram.
+                try:
+                    photo = result.get("photo", [])
+
+                    if photo:
+                        new_file_id = photo[-1]["file_id"]
+
+                        state["latest"]["slides"][
+                            index
+                        ]["file_id"] = new_file_id
+
+                        print(
+                            f"Слайд {slide_number}: "
+                            f"Telegram file_id сохранён."
+                        )
+
+                except Exception as e:
+                    print(
+                        f"Не удалось получить "
+                        f"file_id: {e}"
+                    )
+
+            user["sent"] = current_hash
+            user["want_schedule"] = False
+
+            print(
+                f"Расписание слайда {slide_number} "
+                f"отправлено пользователю {chat_id} "
+                f"(класс {selected_class})."
+            )
+
+        except requests.HTTPError as e:
+            # Пользователь мог заблокировать бота.
+            print(
+                f"Ошибка Telegram для "
+                f"{user_key}: {e}"
+            )
+
+            response = getattr(e, "response", None)
+
+            if response is not None:
+                if response.status_code == 403:
+                    print(
+                        f"Удаляем пользователя "
+                        f"{user_key}: бот заблокирован."
+                    )
+
+                    users.pop(user_key, None)
+
+        except Exception as e:
+            print(
+                f"Ошибка отправки пользователю "
+                f"{user_key}: {e}"
+            )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print("=" * 60)
+    print("School Schedule Bot")
+    print("=" * 60)
+
+    state, state_sha = load_state()
+
+    # --------------------------------------------------------
+    # 1. Сначала забираем новые сообщения Telegram.
+    # --------------------------------------------------------
+
+    print("Получение новых сообщений Telegram...")
+
+    state_changed = process_commands(state)
+
+    if state_changed:
+        print(
+            "Есть изменения состояния "
+            "после обработки Telegram."
+        )
+    else:
+        print(
+            "Новых изменений состояния нет."
+        )
+
+    # --------------------------------------------------------
+    # 2. Скачиваем расписание.
+    # --------------------------------------------------------
+
+    slides = None
+    schedule_changed = False
+
+    try:
+        docx_path = download_docx()
+
+        slides = make_schedule(docx_path)
+
+        old_slides = state["latest"]["slides"]
+
+        for slide in slides:
+            index = slide["number"] - 1
+
+            old_hash = old_slides[index].get(
+                "hash"
+            )
+
+            if old_hash != slide["hash"]:
+                schedule_changed = True
+
+        if schedule_changed:
+            print(
+                "Расписание изменилось."
+            )
+        else:
+            print(
+                "Расписание не изменилось."
+            )
+
+    except Exception as e:
+        print(
+            f"Ошибка расписания: {e}"
+        )
+
+        print(
+            "Старое расписание сохранено."
+        )
+
+        # ----------------------------------------------------
+        # ВАЖНО:
+        # если DOCX сейчас не скачался, мы всё равно
+        # можем отправить пользователю последнюю
+        # сохранённую версию через Telegram file_id.
+        # ----------------------------------------------------
+
+        slides = []
+
+        for i in range(5):
+            slides.append(
+                {
+                    "number": i + 1,
+                    "path": None,
+                    "hash": state["latest"][
+                        "slides"
+                    ][i].get("hash"),
+                }
+            )
+
+    # --------------------------------------------------------
+    # 3. Если свежий DOCX скачан — рассылаем.
+    # Если не скачан — можем отправить старые file_id.
+    # --------------------------------------------------------
+
+    if slides:
+        users = state["users"]
+
+        for user_key, user in list(
+            users.items()
+        ):
+            selected_class = user.get("class")
+
+            if not selected_class:
+                continue
+
+            slide_number = CLASS_TO_SLIDE.get(
+                selected_class
+            )
+
+            if not slide_number:
+                continue
+
+            index = slide_number - 1
+
+            current_slide = slides[index]
+
+            # ------------------------------------------------
+            # Если новый PNG отсутствует,
+            # используем сохранённый Telegram file_id.
+            # ------------------------------------------------
+
+            if current_slide["path"] is None:
+                if not user.get("want_schedule"):
+                    continue
+
+                old_file_id = state[
+                    "latest"
+                ]["slides"][index].get(
+                    "file_id"
+                )
+
+                old_hash = state[
+                    "latest"
+                ]["slides"][index].get(
+                    "hash"
+                )
+
+                if not old_file_id:
+                    print(
+                        f"Нет кешированного расписания "
+                        f"для пользователя {user_key}."
+                    )
+                    continue
+
+                try:
+                    send_slide(
+                        int(user_key),
+                        slide_number,
+                        None,
+                        file_id=old_file_id,
+                        caption=(
+                            f"Расписание "
+                            f"«{selected_class}»"
+                        ),
+                    )
+
+                    user["sent"] = old_hash
+                    user["want_schedule"] = False
+
+                    print(
+                        f"Старая версия расписания "
+                        f"отправлена {user_key}."
+                    )
+
+                    state_changed = True
+
+                except Exception as e:
+                    print(
+                        f"Ошибка отправки старого "
+                        f"расписания {user_key}: {e}"
+                    )
+
+        # ----------------------------------------------------
+        # Если DOCX свежий — обычная рассылка.
+        # ----------------------------------------------------
+
+        if any(
+            slide["path"] is not None
+            for slide in slides
+        ):
+            broadcast(
+                state,
+                slides,
+                schedule_changed,
+            )
+
+            state_changed = True
+
+    # --------------------------------------------------------
+    # 4. Сохраняем state.json.
+    # --------------------------------------------------------
+
+    if state_changed:
+        save_state(
+            state,
+            state_sha,
+        )
+    else:
+        print(
+            "Изменений состояния нет."
+        )
+
+    print("=" * 60)
+    print("Готово.")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
 ```
