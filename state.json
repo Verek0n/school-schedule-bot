@@ -3,7 +3,8 @@
   "subscribers": {
     "1334717692": {
       "class": "10Б",
-      "sent": "b727b51bd340165ffb13f41cb624027392d12495a2b89dc8ecf7059081670e5d"
+      "sent": "b727b51bd340165ffb13f41cb624027392d12495a2b89dc8ecf7059081670e5d",
+      "want_schedule": false
     }
   },
   "latest": {
