@@ -423,6 +423,12 @@ def process_commands(state):
                     }
                     changed = True
 
+                welcome_msg = (
+                    "Добро пожаловать в бота для получения расписания школы №9!\n\n"
+                    "Бот обновляется раз в 5 минут, поэтому возможны небольшие задержки. "
+                    "Если бот не отвечает более 10 минут — напишите @Verek0n\n\n"
+                )
+
                 current_class = (
                     state["users"][user_key]
                     .get("class")
@@ -431,19 +437,13 @@ def process_commands(state):
                 if current_class:
                     send_message(
                         chat_id,
-                        (
-                            f"Текущий класс: "
-                            f"{current_class}\n\n"
-                            "Выберите класс кнопкой ниже."
-                        ),
+                        welcome_msg + f"Текущий класс: {current_class}",
                         class_keyboard(),
                     )
                 else:
                     send_message(
                         chat_id,
-                        (
-                            "Выберите свой класс:"
-                        ),
+                        welcome_msg + "Выберите свой класс на клавиатуре ниже:",
                         class_keyboard(),
                     )
 
@@ -460,7 +460,7 @@ def process_commands(state):
 
                 send_message(
                     chat_id,
-                    "Вы больше не получаете расписание.",
+                    "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
                     REMOVE_KEYBOARD,
                 )
 
@@ -496,7 +496,7 @@ def process_commands(state):
                 if not user.get("class"):
                     send_message(
                         chat_id,
-                        "Сначала выберите класс:",
+                        "Сначала выберите свой класс на клавиатуре:",
                         class_keyboard(),
                     )
                 else:
@@ -505,11 +505,7 @@ def process_commands(state):
 
                     send_message(
                         chat_id,
-                        (
-                            "Запрос на расписание принят. "
-                            "Оно будет отправлено "
-                            "в ближайшее время"
-                        ),
+                        "Запрос принят! Расписание будет отправлено в течение 5 минут",
                     )
 
                 continue
@@ -576,9 +572,8 @@ def process_commands(state):
                 send_message(
                     chat_id,
                     (
-                        f"Класс выбран: «{text}».\n"
-                        "Расписание будет отправлено "
-                        "в ближайшее время"
+                        f"Класс выбран: «{text}»\n"
+                        "Расписание будет отправлено в ближайшее время"
                     ),
                     class_keyboard(),
                 )
@@ -592,10 +587,11 @@ def process_commands(state):
             send_message(
                 chat_id,
                 (
-                    "Используйте кнопки для выбора класса.\n\n"
-                    "/schedule — получить расписание\n"
-                    "/class — выбрать другой класс\n"
-                    "/stop — отключить рассылку"
+                    "Это конечно прикольно, но я умею только:\n"
+                    "/schedule - Получить расписание\n"
+                    "/class - Изменить свой класс\n"
+                    "/start - Подписаться на расписание\n"
+                    "/stop - Отключить рассылку"
                 ),
                 class_keyboard(),
             )
@@ -1107,6 +1103,7 @@ def broadcast(state, slides, schedule_changed):
             # ------------------------------------------------
 
             should_send = False
+            is_new_alert = False
 
             # Пользователь только выбрал класс
             # или запросил /schedule.
@@ -1119,6 +1116,7 @@ def broadcast(state, slides, schedule_changed):
                 and old_user_hash != current_hash
             ):
                 should_send = True
+                is_new_alert = True  # Это автоматическое уведомление о новом расписании
 
             if not should_send:
                 continue
@@ -1128,9 +1126,11 @@ def broadcast(state, slides, schedule_changed):
                 .get("file_id")
             )
 
-            caption = (
-                f"Расписание «{selected_class}»"
-            )
+            # Подпись к фото с динамическим классом
+            if is_new_alert:
+                caption = f"Доступно новое расписание «{selected_class}»!"
+            else:
+                caption = f"Расписание «{selected_class}»"
 
             # ------------------------------------------------
             # Если есть file_id — отправляем его.
@@ -1363,10 +1363,7 @@ def main():
                         slide_number,
                         None,
                         file_id=old_file_id,
-                        caption=(
-                            f"Расписание "
-                            f"«{selected_class}»"
-                        ),
+                        caption=f"Расписание «{selected_class}»",
                     )
 
                     user["sent"] = old_hash
