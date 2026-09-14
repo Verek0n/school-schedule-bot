@@ -206,7 +206,7 @@ def process_commands(state):
                     subscribers[chat_id] = {"sent": None}
                     safe_say(
                         chat_id,
-                        "Подписка на расписание 10Б включена\n\n"
+                        "Подписка на расписание включена\n\n"
                         "Проверки проходят примерно раз в 15 минут, "
                         "возможны задержки\n\n"
                     )
@@ -224,8 +224,8 @@ def process_commands(state):
                         subscribers[chat_id]["sent"] = None
                         safe_say(
                             chat_id,
-                            "Запрос принят. Отправлю последнее "
-                            "доступное расписание.",
+                            "Запрос принят, отправлю последнее "
+                            "доступное расписание",
                         )
                     else:
                         safe_say(
