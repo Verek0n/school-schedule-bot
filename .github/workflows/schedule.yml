@@ -3,9 +3,6 @@ name: School Schedule Bot
 on:
   workflow_dispatch:
 
-  schedule:
-    - cron: "*/5 * * * *"
-
 permissions:
   contents: write
 
@@ -16,20 +13,17 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install system packages
+      - name: Install LibreOffice
         run: |
           sudo apt-get update
           sudo apt-get install -y libreoffice
@@ -39,15 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Chromium
+      - name: Install Playwright
         run: |
           python -m playwright install --with-deps chromium
 
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
-          STATE_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python bot.py
+          STATE_REPO: ${{ github.repository }}
+        run: python bot.py
