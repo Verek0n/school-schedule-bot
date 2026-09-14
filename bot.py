@@ -20,7 +20,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 SOURCE_URL = (
     "https://disk.yandex.ru/i/"
-    "YOUR_YANDEX_LINK"
+    "https://docs.yandex.ru/view/d/zQH249qvBK21O7SXl-9z_SPegnqahzm72s0qoIz-cKg6eG1uRGNFdE5adw"
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
