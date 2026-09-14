@@ -532,29 +532,13 @@ def process_commands(state):
 
                     without_class = total - with_class
 
-                    class_counts = {}
-
-                    for user in subscribers.values():
-                        selected_class = user.get("class")
-
-                        if selected_class:
-                            class_counts[selected_class] = (
-                                class_counts.get(selected_class, 0) + 1
-                            )
-
                     lines = [
                         "📊 Статистика бота",
                         "",
                         f"Всего пользователей: {total}",
                         f"С выбранным классом: {with_class}",
                         f"Без класса: {without_class}",
-                        "",
-                        "По классам:"
                     ]
-
-                    for class_name in CLASS_TO_SLIDE.keys():
-                        count = class_counts.get(class_name, 0)
-                        lines.append(f"{class_name}: {count}")
 
                     send_message(chat_id, "\n".join(lines))
                     continue
