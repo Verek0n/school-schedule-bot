@@ -1,60 +1,53 @@
-name: Check school schedule
+name: School Schedule Bot
 
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "*/5 * * * *"
+
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: school-schedule-bot
   cancel-in-progress: false
 
 jobs:
-  check:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+
+    timeout-minutes: 10
 
     steps:
-      - name: Download project
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
+          cache: "pip"
 
-      - name: Disable unnecessary Google Chrome repository
-        run: |
-          for f in /etc/apt/sources.list.d/*; do
-            if [ -f "$f" ] && grep -q "dl.google.com/linux/chrome" "$f"; then
-              sudo rm -f "$f"
-            fi
-          done
-
-      - name: Install LibreOffice and fonts
+      - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends             libreoffice-writer             fonts-liberation             fonts-crosextra-carlito             fonts-crosextra-caladea
+          sudo apt-get install -y libreoffice
 
-      - name: Install Python libraries and browser
+      - name: Install Python dependencies
         run: |
-          python -m pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Chromium
+        run: |
           python -m playwright install --with-deps chromium
 
-      - name: Check document and send schedule
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           STATE_TOKEN: ${{ secrets.STATE_TOKEN }}
-          STATE_REPO: ${{ secrets.STATE_REPO }}
-        run: python bot.py
-
-      - name: Save download diagnostic screenshot
-        if: failure()
-        uses: actions/upload-artifact@v6
-        with:
-          name: download-diagnostic
-          path: work/download-error.png
-          if-no-files-found: ignore
-          retention-days: 2
+          STATE_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python bot.py
