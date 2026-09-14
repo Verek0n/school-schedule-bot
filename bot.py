@@ -533,7 +533,7 @@ def process_commands(state):
                     without_class = total - with_class
 
                     lines = [
-                        "📊 Статистика бота",
+                        "Статистика бота",
                         "",
                         f"Всего пользователей: {total}",
                         f"С выбранным классом: {with_class}",
