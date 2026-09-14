@@ -11,10 +11,7 @@ from pathlib import Path
 
 import pymupdf
 import requests
-from playwright.sync_api import (
-    sync_playwright,
-    TimeoutError as PlaywrightTimeoutError,
-)
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 # ============================================================
@@ -28,14 +25,12 @@ SOURCE_URL = (
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# Используем старый STATE_TOKEN, если он есть.
-# Если его нет — используем встроенный GITHUB_TOKEN.
-STATE_TOKEN = (
-    os.environ.get("STATE_TOKEN")
-    or os.environ["GITHUB_TOKEN"]
-)
+# ВАЖНО:
+# state.json хранится только в ЭТОМ private-репозитории.
+STATE_REPO = "Verek0n/school-schedule-state"
 
-STATE_REPO = os.environ["STATE_REPO"]
+# Отдельный Fine-grained PAT с доступом к private repo.
+STATE_TOKEN = os.environ["STATE_TOKEN"]
 
 WORK = Path("work")
 WORK.mkdir(exist_ok=True)
@@ -55,7 +50,7 @@ TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 
 # ============================================================
-# КЛАССЫ → НОМЕР СЛАЙДА
+# КЛАССЫ -> СЛАЙДЫ
 # ============================================================
 
 CLASS_PAGE = {
@@ -138,9 +133,7 @@ class SafeError(Exception):
 class TelegramError(SafeError):
     def __init__(self, code):
         self.code = code
-        super().__init__(
-            f"Telegram API: ошибка {code}"
-        )
+        super().__init__(f"Telegram API: ошибка {code}")
 
 
 # ============================================================
@@ -149,7 +142,6 @@ class TelegramError(SafeError):
 
 def telegram(method, data=None, upload=None):
     for attempt in range(3):
-
         files = None
 
         if upload is not None:
@@ -185,7 +177,6 @@ def telegram(method, data=None, upload=None):
         )
 
         if code == 429 and attempt < 2:
-
             delay = result.get(
                 "parameters",
                 {},
@@ -220,10 +211,10 @@ def say(chat_id, text):
 def safe_say(chat_id, text):
     try:
         say(chat_id, text)
-    except Exception:
+    except Exception as error:
         print(
             f"Не удалось отправить сообщение "
-            f"пользователю {chat_id}."
+            f"{chat_id}: {type(error).__name__}"
         )
 
 
@@ -301,19 +292,26 @@ def load_state():
 
     if response.status_code != 200:
         raise SafeError(
-            f"Чтение состояния: HTTP "
-            f"{response.status_code}"
+            f"Чтение состояния из private repo: "
+            f"HTTP {response.status_code}"
         )
 
     result = response.json()
 
-    raw = base64.b64decode(
-        result["content"]
-    )
+    try:
+        raw = base64.b64decode(
+            result["content"]
+        )
 
-    state = json.loads(
-        raw.decode("utf-8")
-    )
+        state = json.loads(
+            raw.decode("utf-8")
+        )
+
+    except Exception as error:
+        raise SafeError(
+            "Не удалось прочитать state.json: "
+            f"{type(error).__name__}"
+        )
 
     state.setdefault(
         "offset",
@@ -330,14 +328,9 @@ def load_state():
         None,
     )
 
-    # --------------------------------------------------------
-    # Миграция старых пользователей
-    # --------------------------------------------------------
-
     for chat_id, subscriber in list(
         state["subscribers"].items()
     ):
-
         if not isinstance(
             subscriber,
             dict,
@@ -365,9 +358,7 @@ def load_state():
             False,
         )
 
-    # Старый формат latest больше не подходит.
     if state["latest"]:
-
         if "slides" not in state["latest"]:
             state["latest"] = None
 
@@ -406,8 +397,10 @@ def save_state(state, sha):
         201,
     ):
         raise SafeError(
-            f"Сохранение состояния: HTTP "
-            f"{response.status_code}"
+            f"Сохранение state.json в "
+            f"{STATE_REPO}: "
+            f"HTTP {response.status_code} "
+            f"{response.text[:300]}"
         )
 
 
@@ -415,13 +408,8 @@ def save_state(state, sha):
 # ПОЛЬЗОВАТЕЛИ
 # ============================================================
 
-def ensure_subscriber(
-    state,
-    chat_id,
-):
-    subscribers = state[
-        "subscribers"
-    ]
+def ensure_subscriber(state, chat_id):
+    subscribers = state["subscribers"]
 
     if chat_id not in subscribers:
         subscribers[chat_id] = {
@@ -430,9 +418,7 @@ def ensure_subscriber(
             "want_schedule": False,
         }
 
-    subscriber = subscribers[
-        chat_id
-    ]
+    subscriber = subscribers[chat_id]
 
     subscriber.setdefault(
         "class",
@@ -453,127 +439,11 @@ def ensure_subscriber(
 
 
 # ============================================================
-# ОТПРАВКА ТЕКУЩЕГО РАСПИСАНИЯ
-# ============================================================
-
-def send_current_schedule(
-    chat_id,
-    subscriber,
-    state,
-    slides_png=None,
-):
-    selected_class = subscriber.get(
-        "class"
-    )
-
-    if (
-        not selected_class
-        or selected_class not in CLASS_PAGE
-    ):
-        show_class_selection(
-            chat_id
-        )
-        return
-
-    latest = state.get(
-        "latest"
-    )
-
-    if not latest:
-        safe_say(
-            chat_id,
-            "Расписание пока недоступно.",
-        )
-        return
-
-    slides = latest.get(
-        "slides",
-        [],
-    )
-
-    slide_index = CLASS_PAGE[
-        selected_class
-    ]
-
-    if (
-        slide_index >= len(slides)
-    ):
-        safe_say(
-            chat_id,
-            "Расписание пока недоступно.",
-        )
-        return
-
-    slide = slides[
-        slide_index
-    ]
-
-    file_id = slide.get(
-        "file_id"
-    )
-
-    caption = (
-        f'Расписание "{selected_class}"'
-    )
-
-    try:
-
-        if file_id:
-
-            send_photo(
-                chat_id,
-                file_id,
-                caption,
-            )
-
-            return
-
-        if (
-            slides_png
-            and slide_index < len(slides_png)
-        ):
-
-            result = send_photo(
-                chat_id,
-                slides_png[
-                    slide_index
-                ],
-                caption,
-            )
-
-            try:
-                slide["file_id"] = (
-                    result["photo"][-1][
-                        "file_id"
-                    ]
-                )
-            except Exception:
-                pass
-
-            return
-
-        safe_say(
-            chat_id,
-            "Актуальное расписание "
-            "ещё загружается. Попробуйте "
-            "через несколько секунд.",
-        )
-
-    except TelegramError:
-        safe_say(
-            chat_id,
-            "Не удалось отправить "
-            "расписание.",
-        )
-
-
-# ============================================================
 # TELEGRAM КОМАНДЫ
 # ============================================================
 
 def process_commands(state):
     for _ in range(10):
-
         updates = telegram(
             "getUpdates",
             {
@@ -598,21 +468,15 @@ def process_commands(state):
             # MESSAGE
             # ------------------------------------------------
 
-            message = update.get(
-                "message"
-            )
+            message = update.get("message")
 
             if message:
-
                 chat = message.get(
                     "chat",
                     {},
                 )
 
-                if chat.get(
-                    "type"
-                ) == "private":
-
+                if chat.get("type") == "private":
                     chat_id = str(
                         chat["id"]
                     )
@@ -625,7 +489,6 @@ def process_commands(state):
                     command = ""
 
                     if text:
-
                         command = (
                             text.split()[0]
                             .split("@")[0]
@@ -638,17 +501,12 @@ def process_commands(state):
 
                     if command == "/start":
 
-                        subscriber = (
-                            ensure_subscriber(
-                                state,
-                                chat_id,
-                            )
+                        subscriber = ensure_subscriber(
+                            state,
+                            chat_id,
                         )
 
-                        if subscriber.get(
-                            "class"
-                        ):
-
+                        if subscriber.get("class"):
                             safe_say(
                                 chat_id,
                                 "Бот уже запущен.\n\n"
@@ -657,17 +515,7 @@ def process_commands(state):
                                 "Изменить класс: /class\n"
                                 "Получить расписание: /schedule",
                             )
-
-                            # При /start текущую картинку
-                            # специально не отправляем повторно.
-
                         else:
-
-                            safe_say(
-                                chat_id,
-                                "Выберите свой класс:",
-                            )
-
                             show_class_selection(
                                 chat_id
                             )
@@ -678,11 +526,9 @@ def process_commands(state):
 
                     elif command == "/class":
 
-                        subscriber = (
-                            ensure_subscriber(
-                                state,
-                                chat_id,
-                            )
+                        ensure_subscriber(
+                            state,
+                            chat_id,
                         )
 
                         show_class_selection(
@@ -695,25 +541,16 @@ def process_commands(state):
 
                     elif command == "/schedule":
 
-                        subscriber = (
-                            ensure_subscriber(
-                                state,
-                                chat_id,
-                            )
+                        subscriber = ensure_subscriber(
+                            state,
+                            chat_id,
                         )
 
-                        if not subscriber.get(
-                            "class"
-                        ):
-
+                        if not subscriber.get("class"):
                             show_class_selection(
                                 chat_id
                             )
-
                         else:
-
-                            # Будет отправлено после
-                            # проверки текущего расписания.
                             subscriber[
                                 "want_schedule"
                             ] = True
@@ -724,9 +561,7 @@ def process_commands(state):
 
                     elif command == "/stop":
 
-                        state[
-                            "subscribers"
-                        ].pop(
+                        state["subscribers"].pop(
                             chat_id,
                             None,
                         )
@@ -743,16 +578,12 @@ def process_commands(state):
                     # Неизвестная команда
                     # ----------------------------------------
 
-                    elif text.startswith(
-                        "/"
-                    ):
-
+                    elif text.startswith("/"):
                         safe_say(
                             chat_id,
                             "/start — запустить бота\n"
                             "/class — изменить класс\n"
-                            "/schedule — получить "
-                            "расписание\n"
+                            "/schedule — получить расписание\n"
                             "/stop — отключить рассылку",
                         )
 
@@ -765,28 +596,21 @@ def process_commands(state):
             )
 
             if callback:
-
-                callback_id = callback.get(
-                    "id"
-                )
+                callback_id = callback.get("id")
 
                 callback_data = callback.get(
                     "data",
                     "",
                 )
 
-                callback_message = (
-                    callback.get(
-                        "message",
-                        {},
-                    )
+                callback_message = callback.get(
+                    "message",
+                    {},
                 )
 
-                callback_chat = (
-                    callback_message.get(
-                        "chat",
-                        {},
-                    )
+                callback_chat = callback_message.get(
+                    "chat",
+                    {},
                 )
 
                 chat_id = str(
@@ -796,19 +620,14 @@ def process_commands(state):
                     )
                 )
 
-                if callback_data.startswith(
-                    "class:"
-                ):
+                if callback_data.startswith("class:"):
 
-                    selected_class = (
-                        callback_data.split(
-                            ":",
-                            1,
-                        )[1]
-                    )
+                    selected_class = callback_data.split(
+                        ":",
+                        1,
+                    )[1]
 
                     if selected_class not in CLASS_PAGE:
-
                         try:
                             telegram(
                                 "answerCallbackQuery",
@@ -826,34 +645,22 @@ def process_commands(state):
 
                     else:
 
-                        subscriber = (
-                            ensure_subscriber(
-                                state,
-                                chat_id,
-                            )
+                        subscriber = ensure_subscriber(
+                            state,
+                            chat_id,
                         )
 
-                        old_class = (
-                            subscriber.get(
-                                "class"
-                            )
-                        )
+                        subscriber["class"] = selected_class
 
-                        subscriber[
-                            "class"
-                        ] = selected_class
-
-                        # Принудительно отправим
-                        # расписание выбранного класса.
-                        subscriber[
-                            "want_schedule"
-                        ] = True
-
-                        # Если пользователь сменил класс,
-                        # старый hash больше не имеет значения.
+                        # При выборе класса обязательно
+                        # отправляем его текущее расписание.
                         subscriber[
                             "sent"
                         ] = None
+
+                        subscriber[
+                            "want_schedule"
+                        ] = True
 
                         try:
                             telegram(
@@ -869,18 +676,11 @@ def process_commands(state):
                         except Exception:
                             pass
 
-                        if old_class:
-                            safe_say(
-                                chat_id,
-                                f'Класс изменён: '
-                                f'"{selected_class}"',
-                            )
-                        else:
-                            safe_say(
-                                chat_id,
-                                f'Выбран класс '
-                                f'"{selected_class}"',
-                            )
+                        safe_say(
+                            chat_id,
+                            f'Выбран класс '
+                            f'"{selected_class}"',
+                        )
 
             state["offset"] = (
                 update["update_id"] + 1
@@ -907,12 +707,9 @@ def find_download_control(page):
         ),
     ]
 
-    scopes = [
-        page
-    ] + list(page.frames)
+    scopes = [page] + list(page.frames)
 
     for pattern in patterns:
-
         for scope in scopes:
 
             locators = [
@@ -928,16 +725,11 @@ def find_download_control(page):
                     "link",
                     name=pattern,
                 ),
-                scope.get_by_title(
-                    pattern
-                ),
-                scope.get_by_label(
-                    pattern
-                ),
+                scope.get_by_title(pattern),
+                scope.get_by_label(pattern),
             ]
 
             for locator in locators:
-
                 try:
                     count = min(
                         locator.count(),
@@ -946,24 +738,15 @@ def find_download_control(page):
                 except Exception:
                     continue
 
-                for index in range(
-                    count
-                ):
-
-                    element = (
-                        locator.nth(
-                            index
-                        )
-                    )
+                for index in range(count):
+                    element = locator.nth(index)
 
                     try:
-
                         if (
                             element.is_visible()
                             and element.is_enabled()
                         ):
                             return element
-
                     except Exception:
                         continue
 
@@ -971,9 +754,7 @@ def find_download_control(page):
 
 
 def download_docx():
-    target = (
-        WORK / "source.docx"
-    )
+    target = WORK / "source.docx"
 
     if target.exists():
         target.unlink()
@@ -996,31 +777,22 @@ def download_docx():
         page = context.new_page()
 
         try:
-
             page.goto(
                 SOURCE_URL,
                 wait_until="domcontentloaded",
                 timeout=90000,
             )
 
-            page.wait_for_timeout(
-                8000
-            )
+            page.wait_for_timeout(8000)
 
             for _ in range(8):
 
-                control = (
-                    find_download_control(
-                        page
-                    )
+                control = find_download_control(
+                    page
                 )
 
                 if control is None:
-
-                    page.wait_for_timeout(
-                        3000
-                    )
-
+                    page.wait_for_timeout(3000)
                     continue
 
                 try:
@@ -1033,12 +805,9 @@ def download_docx():
                             timeout=10000
                         )
 
-                    download = (
-                        event.value
-                    )
+                    download = event.value
 
                     if download.failure():
-
                         raise SafeError(
                             "Браузер сообщил "
                             "об ошибке скачивания."
@@ -1051,35 +820,25 @@ def download_docx():
                     break
 
                 except PlaywrightTimeoutError:
-
-                    page.wait_for_timeout(
-                        2000
-                    )
+                    page.wait_for_timeout(2000)
 
             if not target.exists():
-
                 raise SafeError(
                     "Не удалось скачать DOCX."
                 )
 
-            if not zipfile.is_zipfile(
-                target
-            ):
-
+            if not zipfile.is_zipfile(target):
                 raise SafeError(
                     "Скачанный файл "
                     "не является DOCX."
                 )
 
-            with zipfile.ZipFile(
-                target
-            ) as archive:
+            with zipfile.ZipFile(target) as archive:
 
                 if (
                     "word/document.xml"
                     not in archive.namelist()
                 ):
-
                     raise SafeError(
                         "В скачанном архиве "
                         "нет документа Word."
@@ -1092,8 +851,7 @@ def download_docx():
             try:
                 page.screenshot(
                     path=str(
-                        WORK
-                        / "download-error.png"
+                        WORK / "download-error.png"
                     ),
                     full_page=True,
                 )
@@ -1112,9 +870,7 @@ def download_docx():
 
 def make_schedules(docx_path):
 
-    pdf_path = (
-        WORK / "source.pdf"
-    )
+    pdf_path = WORK / "source.pdf"
 
     if pdf_path.exists():
         pdf_path.unlink()
@@ -1140,18 +896,14 @@ def make_schedules(docx_path):
         result.returncode != 0
         or not pdf_path.exists()
     ):
-
         raise SafeError(
             "LibreOffice не смог "
             "создать PDF."
         )
 
-    with pymupdf.open(
-        pdf_path
-    ) as document:
+    with pymupdf.open(pdf_path) as document:
 
         if len(document) < 5:
-
             raise SafeError(
                 "В PDF меньше 5 страниц. "
                 "Рассылка отменена."
@@ -1159,13 +911,9 @@ def make_schedules(docx_path):
 
         slides = []
 
-        for page_index in range(
-            5
-        ):
+        for page_index in range(5):
 
-            page = document[
-                page_index
-            ]
+            page = document[page_index]
 
             pixmap = page.get_pixmap(
                 matrix=pymupdf.Matrix(
@@ -1176,9 +924,7 @@ def make_schedules(docx_path):
                 alpha=False,
             )
 
-            png = pixmap.tobytes(
-                "png"
-            )
+            png = pixmap.tobytes("png")
 
             digest = hashlib.sha256(
                 png
@@ -1189,9 +935,7 @@ def make_schedules(docx_path):
                 / f"slide-{page_index + 1}.png"
             )
 
-            output_path.write_bytes(
-                png
-            )
+            output_path.write_bytes(png)
 
             slides.append(
                 {
@@ -1207,13 +951,9 @@ def make_schedules(docx_path):
 # РАССЫЛКА
 # ============================================================
 
-def broadcast(
-    state,
-    slides_png,
-):
-    latest = state.get(
-        "latest"
-    )
+def broadcast(state, slides_png):
+
+    latest = state.get("latest")
 
     if not latest:
         return
@@ -1230,10 +970,8 @@ def broadcast(
         state["subscribers"].items()
     ):
 
-        selected_class = (
-            subscriber.get(
-                "class"
-            )
+        selected_class = subscriber.get(
+            "class"
         )
 
         if (
@@ -1246,31 +984,21 @@ def broadcast(
             selected_class
         ]
 
-        slide = slides[
-            slide_index
-        ]
+        slide = slides[slide_index]
 
-        current_hash = slide[
-            "hash"
-        ]
+        current_hash = slide["hash"]
 
-        old_sent_hash = (
-            subscriber.get(
-                "sent"
-            )
+        old_sent_hash = subscriber.get(
+            "sent"
         )
 
-        want_schedule = (
-            subscriber.get(
-                "want_schedule",
-                False,
-            )
+        want_schedule = subscriber.get(
+            "want_schedule",
+            False,
         )
 
-        # ----------------------------------------------------
-        # Определяем тип отправки
-        # ----------------------------------------------------
-
+        # Автоматическая новая рассылка
+        # только если hash изменился.
         is_new_schedule = (
             old_sent_hash is not None
             and old_sent_hash != current_hash
@@ -1285,22 +1013,15 @@ def broadcast(
             continue
 
         if is_new_schedule:
-
             caption = (
                 f'Доступно новое расписание '
                 f'"{selected_class}"!'
             )
-
         else:
-
             caption = (
                 f'Расписание '
                 f'"{selected_class}"'
             )
-
-        # ----------------------------------------------------
-        # Отправляем
-        # ----------------------------------------------------
 
         try:
 
@@ -1320,53 +1041,33 @@ def broadcast(
 
                 if (
                     not slides_png
-                    or slide_index >= len(
-                        slides_png
-                    )
+                    or slide_index >= len(slides_png)
                 ):
                     continue
 
                 result = send_photo(
                     chat_id,
-                    slides_png[
-                        slide_index
-                    ],
+                    slides_png[slide_index],
                     caption,
                 )
 
                 try:
-
-                    slide[
-                        "file_id"
-                    ] = (
-                        result["photo"][-1][
-                            "file_id"
-                        ]
+                    slide["file_id"] = (
+                        result["photo"][-1]["file_id"]
                     )
-
                 except Exception:
                     pass
 
-            subscriber[
-                "sent"
-            ] = current_hash
+            subscriber["sent"] = current_hash
+            subscriber["want_schedule"] = False
 
-            subscriber[
-                "want_schedule"
-            ] = False
-
-            time.sleep(
-                0.1
-            )
+            time.sleep(0.1)
 
         except TelegramError as error:
 
             if error.code == 403:
 
-                # Пользователь заблокировал бота.
-                state[
-                    "subscribers"
-                ].pop(
+                state["subscribers"].pop(
                     chat_id,
                     None,
                 )
@@ -1374,16 +1075,16 @@ def broadcast(
             else:
 
                 print(
-                    "Ошибка отправки "
-                    f"пользователю {chat_id}: "
-                    f"Telegram {error.code}"
+                    f"Ошибка отправки "
+                    f"{chat_id}: Telegram "
+                    f"{error.code}"
                 )
 
         except Exception as error:
 
             print(
-                "Ошибка отправки "
-                f"пользователю {chat_id}: "
+                f"Ошибка отправки "
+                f"{chat_id}: "
                 f"{type(error).__name__}"
             )
 
@@ -1397,18 +1098,14 @@ def main():
     state, sha = load_state()
 
     had_error = False
-
     rendered_slides = None
 
     # --------------------------------------------------------
-    # 1. Сначала получаем команды
+    # 1. Получаем команды Telegram
     # --------------------------------------------------------
 
     try:
-
-        process_commands(
-            state
-        )
+        process_commands(state)
 
     except Exception as error:
 
@@ -1420,17 +1117,15 @@ def main():
         )
 
     # --------------------------------------------------------
-    # 2. Скачиваем документ
+    # 2. Скачиваем и обрабатываем расписание
     # --------------------------------------------------------
 
     try:
 
         docx_path = download_docx()
 
-        rendered_slides = (
-            make_schedules(
-                docx_path
-            )
+        rendered_slides = make_schedules(
+            docx_path
         )
 
         old_latest = state.get(
@@ -1453,17 +1148,13 @@ def main():
 
             old_slide = (
                 old_slides[index]
-                if index < len(
-                    old_slides
-                )
+                if index < len(old_slides)
                 else None
             )
 
             if (
                 old_slide
-                and old_slide.get(
-                    "hash"
-                )
+                and old_slide.get("hash")
                 == rendered["hash"]
             ):
 
@@ -1481,8 +1172,7 @@ def main():
             else:
 
                 print(
-                    f"Слайд {index + 1} "
-                    "изменился."
+                    f"Слайд {index + 1} изменился."
                 )
 
                 new_slides.append(
@@ -1494,9 +1184,7 @@ def main():
                     }
                 )
 
-        state[
-            "latest"
-        ] = {
+        state["latest"] = {
             "slides": new_slides,
         }
 
@@ -1504,17 +1192,11 @@ def main():
 
         had_error = True
 
-        if isinstance(
-            error,
-            SafeError,
-        ):
-
+        if isinstance(error, SafeError):
             print(
                 f"Ошибка расписания: {error}"
             )
-
         else:
-
             print(
                 "Ошибка обработки расписания: "
                 f"{type(error).__name__}"
@@ -1525,7 +1207,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # 3. Отправляем
+    # 3. Рассылаем
     # --------------------------------------------------------
 
     try:
@@ -1553,6 +1235,7 @@ def main():
 
     # --------------------------------------------------------
     # 4. Сохраняем state.json
+    #    ТОЛЬКО В PRIVATE REPO
     # --------------------------------------------------------
 
     try:
@@ -1562,13 +1245,17 @@ def main():
             sha,
         )
 
+        print(
+            f"Состояние сохранено в "
+            f"private repo: {STATE_REPO}"
+        )
+
     except Exception as error:
 
         had_error = True
 
         print(
-            f"Сохранение состояния: "
-            f"{error}"
+            f"Сохранение состояния: {error}"
         )
 
     # --------------------------------------------------------
@@ -1576,7 +1263,6 @@ def main():
     # --------------------------------------------------------
 
     if had_error:
-
         raise SafeError(
             "Запуск завершён с ошибкой."
         )
@@ -1589,7 +1275,6 @@ def main():
 if __name__ == "__main__":
 
     try:
-
         main()
 
     except Exception as error:
