@@ -1,6 +1,9 @@
 name: School Schedule Bot
 
 on:
+  schedule:
+    # Запуск каждые 5 минут с понедельника по субботу (с 4:00 до 18:00 UTC)
+    - cron: '*/5 4-18 * * 1-6'
   workflow_dispatch:
 
 permissions:
@@ -13,10 +16,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -26,14 +28,22 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Cache Playwright Browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install Playwright
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: |
-          python -m playwright install --with-deps chromium
+          python -m playwright install chromium
 
       - name: Run bot
         env:
