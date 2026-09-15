@@ -27,30 +27,22 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(pip index (copy-paste не сработает, ниже ручной ввод) playwright | grep -oP 'playwright \(\K[^\)]+')" >> $GITHUB_OUTPUT
-        # Эта команда вычисляет версию самого playwright, чтобы кэш обновлялся вместе с библиотекой
-        continue-on-error: true
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Cache Playwright Browsers
         uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          # Мы добавили v2 в ключ, чтобы принудительно сбросить старый битый кэш
-          key: ${{ runner.os }}-playwright-v2-${{ hashFiles('requirements.txt') }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          key: ${{ runner.os }}-playwright-v3-${{ hashFiles('requirements.txt') }}
 
       - name: Install Playwright Chromium
-        # Убираем жесткое условие cache-hit, чтобы playwright сам проверил целостность
         run: |
           python -m playwright install chromium
-          
+
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
