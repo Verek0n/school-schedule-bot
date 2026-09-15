@@ -503,7 +503,7 @@ def process_commands(state):
 
                     send_message(
                         chat_id,
-                        "Запрос принят! Расписание отправляется...",
+                        "Запрос принят! Расписание будет отправлено в течение 5 минут",
                     )
 
                 continue
@@ -571,7 +571,7 @@ def process_commands(state):
                     chat_id,
                     (
                         f"Класс выбран: «{text}»\n"
-                        "Расписание отправляется..."
+                        "Расписание будет отправлено в ближайшее время"
                     ),
                     class_keyboard(),
                 )
@@ -598,28 +598,37 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD (DIRECT MENU CLICK)
+# YANDEX PDF DOWNLOAD (FRAME-AWARE)
 # ============================================================
 
-def _click_first_visible(page, candidates, timeout=3000):
-    for cand in candidates:
-        try:
-            loc = page.get_by_text(cand, exact=False) if isinstance(cand, str) else cand
-            count = loc.count()
-            for i in range(count):
-                item = loc.nth(i)
-                if item.is_visible():
-                    item.click(timeout=timeout)
-                    return True
-        except Exception:
-            continue
-    return False
+def _find_element(page, candidates):
+    """
+    Ищет элемент во всех фреймах страницы (включая iframe просмотрщика).
+    """
+    roots = [page] + list(page.frames)
+    for root in roots:
+        for item in candidates:
+            try:
+                if isinstance(item, tuple):
+                    role, pattern = item
+                    loc = root.get_by_role(role, name=pattern)
+                elif isinstance(item, str):
+                    loc = root.get_by_text(item, exact=False)
+                else:
+                    loc = root.get_by_text(item)
+
+                for i in range(loc.count()):
+                    el = loc.nth(i)
+                    if el.is_visible():
+                        return el
+            except Exception:
+                continue
+    return None
 
 
 def download_pdf():
     """
-    Скачивает сразу PDF из Яндекс.Документов:
-    Файл → Скачать → Документ PDF (.pdf)
+    Скачивает сразу PDF из Яндекс.Документов через поиск по iframe.
     """
     target = WORK / "source.pdf"
 
@@ -650,7 +659,7 @@ def download_pdf():
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/124.0.0.0 Safari/537.36"
                 ),
-                viewport={"width": 1600, "height": 1100},
+                viewport={"width": 1920, "height": 1080},
             )
 
             page = context.new_page()
@@ -660,96 +669,77 @@ def download_pdf():
 
             print("Открываем страницу расписания...")
             page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=90000)
-            page.wait_for_timeout(8000)
-
-            try:
-                page.get_by_text("Файл", exact=True).first.wait_for(
-                    state="visible", timeout=30000
-                )
-            except Exception:
-                print("Кнопка «Файл» не появилась сразу, продолжаем...")
+            
+            # Даем интерфейсу редактора догрузиться
+            page.wait_for_timeout(10000)
 
             download_ok = False
 
             for attempt in range(5):
                 print(f"Попытка скачать через меню ({attempt + 1}/5)...")
                 try:
-                    # 1. Открываем «Файл»
-                    if not _click_first_visible(
-                        page,
-                        [
-                            page.get_by_role(
-                                "button", name=re.compile(r"^Файл$", re.I)
-                            ),
-                            page.get_by_text("Файл", exact=True),
-                        ],
-                    ):
-                        page.wait_for_timeout(2000)
+                    # 1. Поиск «Файл» во всех фреймах
+                    file_btn = _find_element(page, [
+                        ("button", re.compile(r"^Файл$", re.I)),
+                        ("menuitem", re.compile(r"^Файл$", re.I)),
+                        re.compile(r"^Файл$", re.I),
+                        "Файл",
+                    ])
+
+                    if not file_btn:
+                        print("Кнопка «Файл» пока не найдена во фреймах...")
+                        page.wait_for_timeout(3000)
                         continue
 
+                    print("Нажатие на «Файл»...")
+                    file_btn.click(timeout=5000)
                     page.wait_for_timeout(1000)
 
-                    # 2. Ищем и наводим на «Скачать»
-                    download_opened = False
-                    for cand in [
-                        page.get_by_role(
-                            "menuitem", name=re.compile(r"Скачать", re.I)
-                        ),
-                        page.get_by_text("Скачать", exact=False),
-                    ]:
-                        try:
-                            for i in range(cand.count()):
-                                item = cand.nth(i)
-                                if item.is_visible():
-                                    item.hover(timeout=2000)
-                                    page.wait_for_timeout(800)
-                                    try:
-                                        item.click(timeout=2000)
-                                    except Exception:
-                                        pass
-                                    download_opened = True
-                                    break
-                            if download_opened:
-                                break
-                        except Exception:
-                            pass
+                    # 2. Поиск «Скачать» во всех фреймах
+                    download_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"Скачать", re.I)),
+                        ("button", re.compile(r"Скачать", re.I)),
+                        re.compile(r"Скачать", re.I),
+                        "Скачать",
+                    ])
 
-                    if not download_opened:
-                        page.mouse.click(10, 10)
+                    if not download_btn:
+                        print("Пункт «Скачать» не найден, сбрасываем...")
+                        page.keyboard.press("Escape")
                         page.wait_for_timeout(1500)
                         continue
 
+                    print("Наведение и клик по «Скачать»...")
+                    try:
+                        download_btn.hover(timeout=3000)
+                        page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+
+                    try:
+                        download_btn.click(timeout=3000)
+                    except Exception:
+                        pass
+
                     page.wait_for_timeout(1000)
 
-                    # 3. Кликаем «Документ PDF (.pdf)»
-                    pdf_candidates = [
-                        page.get_by_role(
-                            "menuitem",
-                            name=re.compile(r"Документ PDF|\.pdf|PDF", re.I),
-                        ),
-                        page.get_by_text("Документ PDF (.pdf)", exact=False),
-                        page.get_by_text(".pdf", exact=False),
-                    ]
+                    # 3. Поиск «Документ PDF (.pdf)» во всех фреймах
+                    pdf_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
+                        ("button", re.compile(r"PDF|\.pdf", re.I)),
+                        re.compile(r"Документ PDF|\.pdf|PDF", re.I),
+                        ".pdf",
+                    ])
 
-                    clicked_pdf = False
-                    with page.expect_download(timeout=30000) as download_info:
-                        for cand in pdf_candidates:
-                            try:
-                                for i in range(cand.count()):
-                                    item = cand.nth(i)
-                                    if item.is_visible():
-                                        item.click(timeout=3000)
-                                        clicked_pdf = True
-                                        break
-                                if clicked_pdf:
-                                    break
-                            except Exception:
-                                pass
+                    if not pdf_btn:
+                        print("Пункт «Документ PDF» не найден.")
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(1500)
+                        continue
 
-                        if not clicked_pdf:
-                            raise RuntimeError(
-                                "Пункт Документ PDF (.pdf) не найден"
-                            )
+                    print("Ожидание скачивания PDF...")
+                    with page.expect_download(timeout=40000) as download_info:
+                        pdf_btn.click(timeout=5000, force=True)
 
                     download = download_info.value
                     if download.failure():
@@ -769,17 +759,16 @@ def download_pdf():
 
                 try:
                     page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                    page.mouse.click(10, 10)
+                    page.wait_for_timeout(1000)
                 except Exception:
                     pass
-                page.wait_for_timeout(2000)
 
             if not download_ok or not target.exists():
                 try:
                     page.screenshot(
                         path=str(WORK / "download-error.png"), full_page=True
                     )
+                    print("Скриншот ошибки сохранён в work/download-error.png")
                 except Exception:
                     pass
                 raise RuntimeError("Не удалось скачать PDF.")
@@ -788,10 +777,11 @@ def download_pdf():
             if browser is not None:
                 browser.close()
 
-    # Базовая проверка
+    # Проверка файла
     if target.stat().st_size < 1000:
         raise RuntimeError("Скачанный PDF слишком мал (возможно, пустой).")
 
+    print("PDF успешно проверен.")
     return target
 
 
