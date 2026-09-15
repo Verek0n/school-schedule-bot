@@ -24,8 +24,7 @@ SOURCE_URL = (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STATE_TOKEN = os.environ["STATE_TOKEN"]
 
-# Интервал проверки сайта Яндекса в секундах (900 сек = 15 минут)
-# Если запускать проверку чаще, Яндекс начнет выдавать капчу.
+# Интервал проверки Яндекса: 900 секунд = 15 минут
 YANDEX_CHECK_INTERVAL = 900 
 
 STATE_REPO = "Verek0n/school-schedule-state"
@@ -40,6 +39,7 @@ GH_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
+# Сессия с пулом соединений для быстрой работы сети
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
@@ -50,20 +50,52 @@ session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, 
 
 CLASS_TO_SLIDE = {
     # Слайд 1
-    "5А": 1, "5Б": 1, "5В": 1, "5Г": 1, "5Д": 1,
-    "5Е": 1, "5Ж": 1, "5З": 1, "6А": 1, "6Б": 1,
+    "5А": 1,
+    "5Б": 1,
+    "5В": 1,
+    "5Г": 1,
+    "5Д": 1,
+    "5Е": 1,
+    "5Ж": 1,
+    "5З": 1,
+    "6А": 1,
+    "6Б": 1,
 
     # Слайд 2
-    "6В": 2, "6Г": 2, "6Д": 2, "6Е": 2, "6Ж": 2,
-    "6З": 2, "7А": 2, "7Б": 2, "7В": 2, "7Г": 2,
+    "6В": 2,
+    "6Г": 2,
+    "6Д": 2,
+    "6Е": 2,
+    "6Ж": 2,
+    "6З": 2,
+    "7А": 2,
+    "7Б": 2,
+    "7В": 2,
+    "7Г": 2,
 
     # Слайд 3
-    "7Д": 3, "7Е": 3, "7Ж": 3, "7И": 3, "8А": 3,
-    "8Б": 3, "8В": 3, "8Г": 3, "8Д": 3, "8Ж": 3,
+    "7Д": 3,
+    "7Е": 3,
+    "7Ж": 3,
+    "7И": 3,
+    "8А": 3,
+    "8Б": 3,
+    "8В": 3,
+    "8Г": 3,
+    "8Д": 3,
+    "8Ж": 3,
 
     # Слайд 4
-    "8З": 4, "9А": 4, "9Б": 4, "9В": 4, "9Г": 4,
-    "9Д": 4, "9Е": 4, "10А": 4, "10Б": 4, "11А": 4,
+    "8З": 4,
+    "9А": 4,
+    "9Б": 4,
+    "9В": 4,
+    "9Г": 4,
+    "9Д": 4,
+    "9Е": 4,
+    "10А": 4,
+    "10Б": 4,
+    "11А": 4,
 
     # Слайд 5
     "11Б": 5,
@@ -75,32 +107,57 @@ CLASS_TO_SLIDE = {
 
 TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+
 def telegram(method, data=None, upload=None):
+    """
+    Вызов Telegram Bot API.
+    upload = путь к файлу для multipart upload.
+    """
     url = f"{TG_URL}/{method}"
+
     for attempt in range(5):
         try:
             files = None
             if upload is not None:
                 upload_path = Path(upload)
-                files = {"photo": (upload_path.name, upload_path.open("rb"), "image/png")}
+                files = {
+                    "photo": (
+                        upload_path.name,
+                        upload_path.open("rb"),
+                        "image/png",
+                    )
+                }
 
-            response = session.post(url, data=data or {}, files=files, timeout=(10, 30))
+            response = session.post(
+                url,
+                data=data or {},
+                files=files,
+                timeout=(10, 30),
+            )
+
             if files:
                 files["photo"][1].close()
 
             if response.status_code == 429:
                 try:
-                    retry_after = response.json().get("parameters", {}).get("retry_after", 5)
+                    retry_after = (
+                        response.json()
+                        .get("parameters", {})
+                        .get("retry_after", 5)
+                    )
                 except Exception:
                     retry_after = 5
+
                 print(f"Telegram rate limit, ждём {retry_after} сек.")
                 time.sleep(retry_after)
                 continue
 
             response.raise_for_status()
             result = response.json()
+
             if not result.get("ok"):
                 raise RuntimeError(f"Telegram API error: {result}")
+
             return result["result"]
 
         except Exception as e:
@@ -112,21 +169,39 @@ def telegram(method, data=None, upload=None):
 
 
 def send_message(chat_id, text, keyboard=None):
-    data = {"chat_id": chat_id, "text": text}
+    data = {
+        "chat_id": chat_id,
+        "text": text,
+    }
+
     if keyboard is not None:
-        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
+        data["reply_markup"] = json.dumps(
+            keyboard,
+            ensure_ascii=False,
+        )
+
     return telegram("sendMessage", data)
 
 
 def send_photo(chat_id, photo_path=None, file_id=None, caption=None):
-    data = {"chat_id": chat_id}
+    data = {
+        "chat_id": chat_id,
+    }
+
     if caption:
         data["caption"] = caption
+
     if file_id:
         data["photo"] = file_id
         return telegram("sendPhoto", data)
+
     if photo_path:
-        return telegram("sendPhoto", data, upload=photo_path)
+        return telegram(
+            "sendPhoto",
+            data,
+            upload=photo_path,
+        )
+
     raise ValueError("Нужно передать photo_path или file_id")
 
 
@@ -137,15 +212,20 @@ def send_photo(chat_id, photo_path=None, file_id=None, caption=None):
 def class_keyboard():
     classes = list(CLASS_TO_SLIDE.keys())
     rows = []
+
     for i in range(0, len(classes), 5):
         rows.append(classes[i:i + 5])
+
     return {
         "keyboard": rows,
         "resize_keyboard": True,
         "one_time_keyboard": False,
     }
 
-REMOVE_KEYBOARD = {"remove_keyboard": True}
+
+REMOVE_KEYBOARD = {
+    "remove_keyboard": True
+}
 
 
 # ============================================================
@@ -158,21 +238,36 @@ def default_state():
         "last_yandex_check": 0,
         "users": {},
         "latest": {
-            "slides": [{"hash": None, "file_id": None} for _ in range(5)]
+            "slides": [
+                {
+                    "hash": None,
+                    "file_id": None,
+                }
+                for _ in range(5)
+            ]
         },
     }
 
 
 def load_state():
     try:
-        response = session.get(STATE_URL, headers=GH_HEADERS, timeout=15)
+        response = session.get(
+            STATE_URL,
+            headers=GH_HEADERS,
+            timeout=15,
+        )
+
         if response.status_code == 404:
             print("state.json ещё не существует.")
             return default_state(), None
 
         response.raise_for_status()
         payload = response.json()
-        content = base64.b64decode(payload["content"]).decode("utf-8")
+
+        content = base64.b64decode(
+            payload["content"]
+        ).decode("utf-8")
+
         state = json.loads(content)
 
         state.setdefault("offset", 0)
@@ -181,10 +276,21 @@ def load_state():
         state.setdefault("latest", {})
 
         if "slides" not in state["latest"]:
-            state["latest"]["slides"] = [{"hash": None, "file_id": None} for _ in range(5)]
+            state["latest"]["slides"] = [
+                {
+                    "hash": None,
+                    "file_id": None,
+                }
+                for _ in range(5)
+            ]
 
         while len(state["latest"]["slides"]) < 5:
-            state["latest"]["slides"].append({"hash": None, "file_id": None})
+            state["latest"]["slides"].append(
+                {
+                    "hash": None,
+                    "file_id": None,
+                }
+            )
 
         return state, payload["sha"]
 
@@ -194,21 +300,37 @@ def load_state():
 
 
 def save_state(state, sha=None):
-    content = json.dumps(state, ensure_ascii=False, indent=2)
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    content = json.dumps(
+        state,
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    encoded = base64.b64encode(
+        content.encode("utf-8")
+    ).decode("ascii")
 
     data = {
         "message": "Update state.json",
         "content": encoded,
         "branch": "main",
     }
+
     if sha:
         data["sha"] = sha
 
-    response = session.put(STATE_URL, headers=GH_HEADERS, json=data, timeout=15)
+    response = session.put(
+        STATE_URL,
+        headers=GH_HEADERS,
+        json=data,
+        timeout=15,
+    )
+
     response.raise_for_status()
+    result = response.json()
+
     print("state.json сохранён.")
-    return response.json()["content"]["sha"]
+    return result["content"]["sha"]
 
 
 # ============================================================
@@ -222,38 +344,57 @@ def get_updates(offset):
             "offset": offset,
             "limit": 100,
             "timeout": 0,
-            "allowed_updates": json.dumps(["message"]),
+            "allowed_updates": json.dumps(
+                ["message"]
+            ),
         },
     )
 
 
 def process_commands(state):
+    """
+    Обрабатывает входящие сообщения Telegram.
+    """
     changed = False
 
-    for _ in range(10):
+    for batch_number in range(10):
         updates = get_updates(state["offset"])
+
         if not updates:
             break
 
         for update in updates:
-            state["offset"] = update["update_id"] + 1
+            state["offset"] = (
+                update["update_id"] + 1
+            )
+
             message = update.get("message")
             if not message:
                 continue
 
             chat = message.get("chat", {})
             chat_id = chat.get("id")
+
             if chat.get("type") != "private":
                 continue
 
-            text = (message.get("text") or "").strip()
+            text = (
+                message.get("text") or ""
+            ).strip()
+
             if not text:
                 continue
 
-            print(f"Получено сообщение от {chat_id}: {text}")
+            print(
+                f"Получено сообщение "
+                f"от {chat_id}: {text}"
+            )
+
             user_key = str(chat_id)
 
+            # ------------------------------------------------
             # /start
+            # ------------------------------------------------
             if text == "/start":
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -269,7 +410,11 @@ def process_commands(state):
                     "Если бот не отвечает более 10 минут — напишите @Verek0n\n\n"
                 )
 
-                current_class = state["users"][user_key].get("class")
+                current_class = (
+                    state["users"][user_key]
+                    .get("class")
+                )
+
                 if current_class:
                     send_message(
                         chat_id,
@@ -282,9 +427,12 @@ def process_commands(state):
                         welcome_msg + "Выберите свой класс на клавиатуре ниже:",
                         class_keyboard(),
                     )
+
                 continue
 
+            # ------------------------------------------------
             # /stop
+            # ------------------------------------------------
             if text == "/stop":
                 if user_key in state["users"]:
                     del state["users"][user_key]
@@ -295,14 +443,23 @@ def process_commands(state):
                     "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
                     REMOVE_KEYBOARD,
                 )
+
                 continue
 
+            # ------------------------------------------------
             # /class
+            # ------------------------------------------------
             if text == "/class":
-                send_message(chat_id, "Выберите класс:", class_keyboard())
+                send_message(
+                    chat_id,
+                    "Выберите класс:",
+                    class_keyboard(),
+                )
                 continue
 
+            # ------------------------------------------------
             # /schedule
+            # ------------------------------------------------
             if text == "/schedule":
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -313,6 +470,7 @@ def process_commands(state):
                     changed = True
 
                 user = state["users"][user_key]
+
                 if not user.get("class"):
                     send_message(
                         chat_id,
@@ -322,18 +480,28 @@ def process_commands(state):
                 else:
                     user["want_schedule"] = True
                     changed = True
+
                     send_message(
                         chat_id,
                         "Запрос принят! Расписание отправляется...",
                     )
+
                 continue
 
-            # /stats
+            # ------------------------------------------------
+            # /stats (Только для администратора)
+            # ------------------------------------------------
             if text == "/stats":
                 if user_key == "1334717692":
                     subscribers = state.get("users", {})
                     total = len(subscribers)
-                    with_class = sum(1 for u in subscribers.values() if u.get("class"))
+
+                    with_class = sum(
+                        1
+                        for user in subscribers.values()
+                        if user.get("class")
+                    )
+
                     without_class = total - with_class
 
                     lines = [
@@ -343,10 +511,13 @@ def process_commands(state):
                         f"С выбранным классом: {with_class}",
                         f"Без класса: {without_class}",
                     ]
+
                     send_message(chat_id, "\n".join(lines))
                     continue
 
-            # Кнопка класса
+            # ------------------------------------------------
+            # CLASS BUTTON
+            # ------------------------------------------------
             if text in CLASS_TO_SLIDE:
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -358,19 +529,32 @@ def process_commands(state):
                 user = state["users"][user_key]
                 old_class = user.get("class")
                 user["class"] = text
+
+                # Обязательно отправить новое расписание
                 user["sent"] = None
                 user["want_schedule"] = True
                 changed = True
 
-                print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
+                print(
+                    f"Пользователь {chat_id} "
+                    f"выбрал класс {text} "
+                    f"(было: {old_class})"
+                )
+
                 send_message(
                     chat_id,
-                    f"Класс выбран: «{text}»\nРасписание отправляется...",
+                    (
+                        f"Класс выбран: «{text}»\n"
+                        "Расписание отправляется..."
+                    ),
                     class_keyboard(),
                 )
+
                 continue
 
-            # Неизвестная команда
+            # ------------------------------------------------
+            # UNKNOWN
+            # ------------------------------------------------
             send_message(
                 chat_id,
                 (
@@ -387,10 +571,13 @@ def process_commands(state):
 
 
 # ============================================================
-# PLAYWRIGHT & YANDEX
+# YANDEX PDF DOWNLOAD (FRAME-AWARE & OPTIMIZED)
 # ============================================================
 
 def _find_element(page, candidates):
+    """
+    Ищет элемент во всех фреймах страницы (включая iframe просмотрщика).
+    """
     roots = [page] + list(page.frames)
     for root in roots:
         for item in candidates:
@@ -411,6 +598,9 @@ def _find_element(page, candidates):
 
 
 def download_pdf():
+    """
+    Скачивает PDF из Яндекс.Документов через браузер.
+    """
     target = WORK / "source.pdf"
     if target.exists():
         target.unlink()
@@ -441,6 +631,7 @@ def download_pdf():
 
         page = context.new_page()
 
+        # Блокируем метрику для ускорения загрузки
         def route_filter(route):
             url = route.request.url
             if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
@@ -448,6 +639,8 @@ def download_pdf():
             return route.continue_()
 
         page.route("**/*", route_filter)
+
+        print("Открываем страницу расписания...")
         page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
 
         download_ok = False
@@ -460,6 +653,7 @@ def download_pdf():
                     re.compile(r"^Файл$", re.I),
                     "Файл",
                 ])
+
                 if not file_btn:
                     page.wait_for_timeout(1000)
                     continue
@@ -472,6 +666,7 @@ def download_pdf():
                     re.compile(r"Скачать", re.I),
                     "Скачать",
                 ])
+
                 if not download_btn:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(500)
@@ -489,11 +684,13 @@ def download_pdf():
                     re.compile(r"Документ PDF|\.pdf|PDF", re.I),
                     ".pdf",
                 ])
+
                 if not pdf_btn:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(500)
                     continue
 
+                print("Ожидание скачивания PDF...")
                 with page.expect_download(timeout=25000) as download_info:
                     pdf_btn.click(timeout=4000, force=True)
 
@@ -502,6 +699,7 @@ def download_pdf():
                     raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
 
                 download.save_as(target)
+                print(f"PDF скачан: {target}")
                 download_ok = True
                 break
 
@@ -516,52 +714,79 @@ def download_pdf():
     if target.stat().st_size < 1000:
         raise RuntimeError("Скачанный PDF слишком мал.")
 
-    print("PDF успешно получен.")
+    print("PDF успешно проверен.")
     return target
 
 
+# ============================================================
+# PDF -> 5 PNG
+# ============================================================
+
 def make_schedule(pdf_path):
+    """
+    Открывает скачанный PDF и сохраняет 5 первых страниц как слайды PNG.
+    """
     print("Рендер PDF в PNG...")
     doc = pymupdf.open(pdf_path)
     slides = []
 
     try:
-        if len(doc) < 5:
-            raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {len(doc)}.")
+        page_count = len(doc)
+        print(f"В PDF найдено страниц: {page_count}")
+
+        if page_count < 5:
+            raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {page_count}.")
 
         matrix = pymupdf.Matrix(150 / 72, 150 / 72)
+
         for slide_number in range(1, 6):
-            page = doc[slide_number - 1]
-            pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace=pymupdf.csRGB)
+            page_index = slide_number - 1
+            page = doc[page_index]
+
+            pix = page.get_pixmap(
+                matrix=matrix,
+                alpha=False,
+                colorspace=pymupdf.csRGB,
+            )
+
             png_path = WORK / f"slide_{slide_number}.png"
             pix.save(str(png_path))
 
-            image_hash = hashlib.sha256(png_path.read_bytes()).hexdigest()
+            image_bytes = png_path.read_bytes()
+            image_hash = hashlib.sha256(image_bytes).hexdigest()
+
             slides.append({
                 "number": slide_number,
                 "path": png_path,
                 "hash": image_hash,
             })
 
+            print(f"Слайд {slide_number}: {png_path.name}, hash={image_hash[:12]}")
+
         return slides
+
     finally:
         doc.close()
 
 
 # ============================================================
-# SEND & BROADCAST
+# SEND ONE SLIDE
 # ============================================================
 
 def send_slide(chat_id, slide_number, slide_path, file_id=None, caption=None):
     if file_id:
         return send_photo(chat_id, file_id=file_id, caption=caption)
-    return send_photo(chat_id, photo_path=slide_path, caption=caption)
+    else:
+        return send_photo(chat_id, photo_path=slide_path, caption=caption)
 
+
+# ============================================================
+# FAST USER REQUEST FULFILLMENT (FROM CACHE)
+# ============================================================
 
 def fulfill_user_requests(state):
     """
-    Быстрая отправка расписания тем, кто нажал кнопку или запросил /schedule,
-    используя закэшированные в Telegram file_id (без скачивания с Яндекса).
+    Быстрая отправка расписания пользователям из кэша Telegram (за 0.5 сек).
     """
     changed = False
     users = state["users"]
@@ -599,6 +824,7 @@ def fulfill_user_requests(state):
             print(f"Мгновенно отправлено из кэша для {user_key} ({selected_class})")
         except requests.HTTPError as e:
             if getattr(e.response, "status_code", None) == 403:
+                print(f"Удаляем пользователя {user_key}: бот заблокирован.")
                 users.pop(user_key, None)
                 changed = True
         except Exception as e:
@@ -607,16 +833,27 @@ def fulfill_user_requests(state):
     return changed
 
 
+# ============================================================
+# BROADCAST
+# ============================================================
+
 def broadcast(state, slides, schedule_changed):
+    """
+    Рассылает обновленное расписание пользователям.
+    """
     users = state["users"]
     old_slides = state["latest"]["slides"]
 
     for slide in slides:
-        idx = slide["number"] - 1
-        old = old_slides[idx]
-        if old.get("hash") != slide["hash"]:
-            old["hash"] = slide["hash"]
-            old["file_id"] = None
+        number = slide["number"]
+        index = number - 1
+        old = old_slides[index]
+
+        if old.get("hash") == slide["hash"]:
+            continue
+
+        old["hash"] = slide["hash"]
+        old["file_id"] = None
 
     for user_key, user in list(users.items()):
         try:
@@ -648,24 +885,56 @@ def broadcast(state, slides, schedule_changed):
                 continue
 
             cached_file_id = state["latest"]["slides"][index].get("file_id")
-            caption = f"Доступно новое расписание «{selected_class}»!" if is_new_alert else f"Расписание «{selected_class}»"
+
+            if is_new_alert:
+                caption = f"Доступно новое расписание «{selected_class}»!"
+            else:
+                caption = f"Расписание «{selected_class}»"
 
             if cached_file_id:
-                send_slide(chat_id, slide_number, current_slide["path"], file_id=cached_file_id, caption=caption)
+                result = send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=cached_file_id,
+                    caption=caption,
+                )
             else:
-                res = send_slide(chat_id, slide_number, current_slide["path"], file_id=None, caption=caption)
-                photos = res.get("photo", [])
-                if photos:
-                    state["latest"]["slides"][index]["file_id"] = photos[-1]["file_id"]
+                result = send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=None,
+                    caption=caption,
+                )
+
+                try:
+                    photo = result.get("photo", [])
+                    if photo:
+                        new_file_id = photo[-1]["file_id"]
+                        state["latest"]["slides"][index]["file_id"] = new_file_id
+                        print(f"Слайд {slide_number}: Telegram file_id сохранён.")
+                except Exception as e:
+                    print(f"Не удалось получить file_id: {e}")
 
             user["sent"] = current_hash
             user["want_schedule"] = False
 
+            print(
+                f"Расписание слайда {slide_number} "
+                f"отправлено пользователю {chat_id} "
+                f"(класс {selected_class})."
+            )
+
         except requests.HTTPError as e:
-            if getattr(e.response, "status_code", None) == 403:
+            print(f"Ошибка Telegram для {user_key}: {e}")
+            response = getattr(e, "response", None)
+            if response is not None and response.status_code == 403:
+                print(f"Удаляем пользователя {user_key}: бот заблокирован.")
                 users.pop(user_key, None)
+
         except Exception as e:
-            print(f"Ошибка рассылки {user_key}: {e}")
+            print(f"Ошибка отправки пользователю {user_key}: {e}")
 
 
 # ============================================================
@@ -679,23 +948,24 @@ def main():
 
     state, state_sha = load_state()
 
+    # 1. Забираем входящие сообщения
     print("Получение новых сообщений Telegram...")
     state_changed = process_commands(state)
 
-    # 1. Быстро отвечаем тем, кто нажал кнопку, используя закэшированные слайды
+    # 2. Быстро обрабатываем запросы пользователей через кэш
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 2. Проверяем, пора ли идти в Яндекс за новым файлом
-    now = time.time()
-    time_since_last_check = now - state.get("last_yandex_check", 0)
+    # 3. Проверяем, есть ли пользователи, требующие скачивания Яндекса (нет в кэше)
     has_unfulfilled_users = any(u.get("want_schedule") for u in state["users"].values())
 
-    # Идем в Яндекс только если прошло >15 минут или если в кэше еще нет картинок
+    now = time.time()
+    time_since_last_check = now - state.get("last_yandex_check", 0)
+
+    # Идем в Яндекс ТОЛЬКО если прошло 15 минут ИЛИ если пользователь запросил класс, которого еще нет в кэше
     should_fetch_yandex = (
         time_since_last_check >= YANDEX_CHECK_INTERVAL
         or has_unfulfilled_users
-        or any(s.get("file_id") is None for s in state["latest"]["slides"])
     )
 
     if should_fetch_yandex:
@@ -711,7 +981,7 @@ def main():
                     schedule_changed = True
 
             if schedule_changed:
-                print("Расписание изменилось!")
+                print("Расписание изменилось.")
             else:
                 print("Расписание не изменилось.")
 
@@ -720,11 +990,12 @@ def main():
             state_changed = True
 
         except Exception as e:
-            print(f"Ошибка при проверке Яндекса: {e}")
+            print(f"Ошибка расписания: {e}")
+            print("Старое расписание сохранено.")
     else:
         print(f"Пропуск скачивания с Яндекса (прошло всего {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с)")
 
-    # 3. Сохраняем состояние
+    # 4. Сохраняем состояние
     if state_changed:
         save_state(state, state_sha)
     else:
