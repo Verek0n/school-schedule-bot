@@ -24,8 +24,11 @@ SOURCE_URL = (
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STATE_TOKEN = os.environ["STATE_TOKEN"]
 
+# В чат админа отправляем фото для получения file_id, затем удаляем
+ADMIN_CHAT_ID = 1334717692
+
 # Интервал проверки Яндекса: 900 секунд = 15 минут
-YANDEX_CHECK_INTERVAL = 900 
+YANDEX_CHECK_INTERVAL = 900
 
 STATE_REPO = "Verek0n/school-schedule-state"
 WORK = Path("work")
@@ -39,7 +42,6 @@ GH_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-# Сессия с пулом соединений для быстрой работы сети
 session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
@@ -49,55 +51,18 @@ session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, 
 # ============================================================
 
 CLASS_TO_SLIDE = {
-    # Слайд 1
-    "5А": 1,
-    "5Б": 1,
-    "5В": 1,
-    "5Г": 1,
-    "5Д": 1,
-    "5Е": 1,
-    "5Ж": 1,
-    "5З": 1,
-    "6А": 1,
-    "6Б": 1,
+    "5А": 1, "5Б": 1, "5В": 1, "5Г": 1, "5Д": 1,
+    "5Е": 1, "5Ж": 1, "5З": 1, "6А": 1, "6Б": 1,
 
-    # Слайд 2
-    "6В": 2,
-    "6Г": 2,
-    "6Д": 2,
-    "6Е": 2,
-    "6Ж": 2,
-    "6З": 2,
-    "7А": 2,
-    "7Б": 2,
-    "7В": 2,
-    "7Г": 2,
+    "6В": 2, "6Г": 2, "6Д": 2, "6Е": 2, "6Ж": 2,
+    "6З": 2, "7А": 2, "7Б": 2, "7В": 2, "7Г": 2,
 
-    # Слайд 3
-    "7Д": 3,
-    "7Е": 3,
-    "7Ж": 3,
-    "7И": 3,
-    "8А": 3,
-    "8Б": 3,
-    "8В": 3,
-    "8Г": 3,
-    "8Д": 3,
-    "8Ж": 3,
+    "7Д": 3, "7Е": 3, "7Ж": 3, "7И": 3, "8А": 3,
+    "8Б": 3, "8В": 3, "8Г": 3, "8Д": 3, "8Ж": 3,
 
-    # Слайд 4
-    "8З": 4,
-    "9А": 4,
-    "9Б": 4,
-    "9В": 4,
-    "9Г": 4,
-    "9Д": 4,
-    "9Е": 4,
-    "10А": 4,
-    "10Б": 4,
-    "11А": 4,
+    "8З": 4, "9А": 4, "9Б": 4, "9В": 4, "9Г": 4,
+    "9Д": 4, "9Е": 4, "10А": 4, "10Б": 4, "11А": 4,
 
-    # Слайд 5
     "11Б": 5,
 }
 
@@ -109,10 +74,6 @@ TG_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 def telegram(method, data=None, upload=None):
-    """
-    Вызов Telegram Bot API.
-    upload = путь к файлу для multipart upload.
-    """
     url = f"{TG_URL}/{method}"
 
     for attempt in range(5):
@@ -169,40 +130,29 @@ def telegram(method, data=None, upload=None):
 
 
 def send_message(chat_id, text, keyboard=None):
-    data = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-
+    data = {"chat_id": chat_id, "text": text}
     if keyboard is not None:
-        data["reply_markup"] = json.dumps(
-            keyboard,
-            ensure_ascii=False,
-        )
-
+        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
     return telegram("sendMessage", data)
 
 
 def send_photo(chat_id, photo_path=None, file_id=None, caption=None):
-    data = {
-        "chat_id": chat_id,
-    }
-
+    data = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption
-
     if file_id:
         data["photo"] = file_id
         return telegram("sendPhoto", data)
-
     if photo_path:
-        return telegram(
-            "sendPhoto",
-            data,
-            upload=photo_path,
-        )
-
+        return telegram("sendPhoto", data, upload=photo_path)
     raise ValueError("Нужно передать photo_path или file_id")
+
+
+def delete_message(chat_id, message_id):
+    return telegram("deleteMessage", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+    })
 
 
 # ============================================================
@@ -212,20 +162,15 @@ def send_photo(chat_id, photo_path=None, file_id=None, caption=None):
 def class_keyboard():
     classes = list(CLASS_TO_SLIDE.keys())
     rows = []
-
     for i in range(0, len(classes), 5):
         rows.append(classes[i:i + 5])
-
     return {
         "keyboard": rows,
         "resize_keyboard": True,
         "one_time_keyboard": False,
     }
 
-
-REMOVE_KEYBOARD = {
-    "remove_keyboard": True
-}
+REMOVE_KEYBOARD = {"remove_keyboard": True}
 
 
 # ============================================================
@@ -239,11 +184,7 @@ def default_state():
         "users": {},
         "latest": {
             "slides": [
-                {
-                    "hash": None,
-                    "file_id": None,
-                }
-                for _ in range(5)
+                {"hash": None, "file_id": None} for _ in range(5)
             ]
         },
     }
@@ -251,11 +192,7 @@ def default_state():
 
 def load_state():
     try:
-        response = session.get(
-            STATE_URL,
-            headers=GH_HEADERS,
-            timeout=15,
-        )
+        response = session.get(STATE_URL, headers=GH_HEADERS, timeout=15)
 
         if response.status_code == 404:
             print("state.json ещё не существует.")
@@ -263,11 +200,7 @@ def load_state():
 
         response.raise_for_status()
         payload = response.json()
-
-        content = base64.b64decode(
-            payload["content"]
-        ).decode("utf-8")
-
+        content = base64.b64decode(payload["content"]).decode("utf-8")
         state = json.loads(content)
 
         state.setdefault("offset", 0)
@@ -277,20 +210,11 @@ def load_state():
 
         if "slides" not in state["latest"]:
             state["latest"]["slides"] = [
-                {
-                    "hash": None,
-                    "file_id": None,
-                }
-                for _ in range(5)
+                {"hash": None, "file_id": None} for _ in range(5)
             ]
 
         while len(state["latest"]["slides"]) < 5:
-            state["latest"]["slides"].append(
-                {
-                    "hash": None,
-                    "file_id": None,
-                }
-            )
+            state["latest"]["slides"].append({"hash": None, "file_id": None})
 
         return state, payload["sha"]
 
@@ -300,37 +224,21 @@ def load_state():
 
 
 def save_state(state, sha=None):
-    content = json.dumps(
-        state,
-        ensure_ascii=False,
-        indent=2,
-    )
-
-    encoded = base64.b64encode(
-        content.encode("utf-8")
-    ).decode("ascii")
+    content = json.dumps(state, ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
 
     data = {
         "message": "Update state.json",
         "content": encoded,
         "branch": "main",
     }
-
     if sha:
         data["sha"] = sha
 
-    response = session.put(
-        STATE_URL,
-        headers=GH_HEADERS,
-        json=data,
-        timeout=15,
-    )
-
+    response = session.put(STATE_URL, headers=GH_HEADERS, json=data, timeout=15)
     response.raise_for_status()
-    result = response.json()
-
     print("state.json сохранён.")
-    return result["content"]["sha"]
+    return response.json()["content"]["sha"]
 
 
 # ============================================================
@@ -344,57 +252,38 @@ def get_updates(offset):
             "offset": offset,
             "limit": 100,
             "timeout": 0,
-            "allowed_updates": json.dumps(
-                ["message"]
-            ),
+            "allowed_updates": json.dumps(["message"]),
         },
     )
 
 
 def process_commands(state):
-    """
-    Обрабатывает входящие сообщения Telegram.
-    """
     changed = False
 
-    for batch_number in range(10):
+    for _ in range(10):
         updates = get_updates(state["offset"])
-
         if not updates:
             break
 
         for update in updates:
-            state["offset"] = (
-                update["update_id"] + 1
-            )
-
+            state["offset"] = update["update_id"] + 1
             message = update.get("message")
             if not message:
                 continue
 
             chat = message.get("chat", {})
             chat_id = chat.get("id")
-
             if chat.get("type") != "private":
                 continue
 
-            text = (
-                message.get("text") or ""
-            ).strip()
-
+            text = (message.get("text") or "").strip()
             if not text:
                 continue
 
-            print(
-                f"Получено сообщение "
-                f"от {chat_id}: {text}"
-            )
-
+            print(f"Получено сообщение от {chat_id}: {text}")
             user_key = str(chat_id)
 
-            # ------------------------------------------------
             # /start
-            # ------------------------------------------------
             if text == "/start":
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -410,11 +299,7 @@ def process_commands(state):
                     "Если бот не отвечает более 10 минут — напишите @Verek0n\n\n"
                 )
 
-                current_class = (
-                    state["users"][user_key]
-                    .get("class")
-                )
-
+                current_class = state["users"][user_key].get("class")
                 if current_class:
                     send_message(
                         chat_id,
@@ -427,12 +312,9 @@ def process_commands(state):
                         welcome_msg + "Выберите свой класс на клавиатуре ниже:",
                         class_keyboard(),
                     )
-
                 continue
 
-            # ------------------------------------------------
             # /stop
-            # ------------------------------------------------
             if text == "/stop":
                 if user_key in state["users"]:
                     del state["users"][user_key]
@@ -443,23 +325,14 @@ def process_commands(state):
                     "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
                     REMOVE_KEYBOARD,
                 )
-
                 continue
 
-            # ------------------------------------------------
             # /class
-            # ------------------------------------------------
             if text == "/class":
-                send_message(
-                    chat_id,
-                    "Выберите класс:",
-                    class_keyboard(),
-                )
+                send_message(chat_id, "Выберите класс:", class_keyboard())
                 continue
 
-            # ------------------------------------------------
             # /schedule
-            # ------------------------------------------------
             if text == "/schedule":
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -470,7 +343,6 @@ def process_commands(state):
                     changed = True
 
                 user = state["users"][user_key]
-
                 if not user.get("class"):
                     send_message(
                         chat_id,
@@ -480,28 +352,18 @@ def process_commands(state):
                 else:
                     user["want_schedule"] = True
                     changed = True
-
                     send_message(
                         chat_id,
                         "Запрос принят! Расписание отправляется...",
                     )
-
                 continue
 
-            # ------------------------------------------------
-            # /stats (Только для администратора)
-            # ------------------------------------------------
+            # /stats
             if text == "/stats":
                 if user_key == "1334717692":
                     subscribers = state.get("users", {})
                     total = len(subscribers)
-
-                    with_class = sum(
-                        1
-                        for user in subscribers.values()
-                        if user.get("class")
-                    )
-
+                    with_class = sum(1 for u in subscribers.values() if u.get("class"))
                     without_class = total - with_class
 
                     lines = [
@@ -511,13 +373,10 @@ def process_commands(state):
                         f"С выбранным классом: {with_class}",
                         f"Без класса: {without_class}",
                     ]
-
                     send_message(chat_id, "\n".join(lines))
                     continue
 
-            # ------------------------------------------------
             # CLASS BUTTON
-            # ------------------------------------------------
             if text in CLASS_TO_SLIDE:
                 if user_key not in state["users"]:
                     state["users"][user_key] = {
@@ -529,32 +388,19 @@ def process_commands(state):
                 user = state["users"][user_key]
                 old_class = user.get("class")
                 user["class"] = text
-
-                # Обязательно отправить новое расписание
                 user["sent"] = None
                 user["want_schedule"] = True
                 changed = True
 
-                print(
-                    f"Пользователь {chat_id} "
-                    f"выбрал класс {text} "
-                    f"(было: {old_class})"
-                )
-
+                print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
                 send_message(
                     chat_id,
-                    (
-                        f"Класс выбран: «{text}»\n"
-                        "Расписание отправляется..."
-                    ),
+                    f"Класс выбран: «{text}»\nРасписание отправляется...",
                     class_keyboard(),
                 )
-
                 continue
 
-            # ------------------------------------------------
             # UNKNOWN
-            # ------------------------------------------------
             send_message(
                 chat_id,
                 (
@@ -571,13 +417,10 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD (FRAME-AWARE & OPTIMIZED)
+# YANDEX PDF DOWNLOAD
 # ============================================================
 
 def _find_element(page, candidates):
-    """
-    Ищет элемент во всех фреймах страницы (включая iframe просмотрщика).
-    """
     roots = [page] + list(page.frames)
     for root in roots:
         for item in candidates:
@@ -598,9 +441,6 @@ def _find_element(page, candidates):
 
 
 def download_pdf():
-    """
-    Скачивает PDF из Яндекс.Документов через браузер.
-    """
     target = WORK / "source.pdf"
     if target.exists():
         target.unlink()
@@ -631,7 +471,6 @@ def download_pdf():
 
         page = context.new_page()
 
-        # Блокируем метрику для ускорения загрузки
         def route_filter(route):
             url = route.request.url
             if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
@@ -639,8 +478,6 @@ def download_pdf():
             return route.continue_()
 
         page.route("**/*", route_filter)
-
-        print("Открываем страницу расписания...")
         page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
 
         download_ok = False
@@ -653,7 +490,6 @@ def download_pdf():
                     re.compile(r"^Файл$", re.I),
                     "Файл",
                 ])
-
                 if not file_btn:
                     page.wait_for_timeout(1000)
                     continue
@@ -666,7 +502,6 @@ def download_pdf():
                     re.compile(r"Скачать", re.I),
                     "Скачать",
                 ])
-
                 if not download_btn:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(500)
@@ -684,7 +519,6 @@ def download_pdf():
                     re.compile(r"Документ PDF|\.pdf|PDF", re.I),
                     ".pdf",
                 ])
-
                 if not pdf_btn:
                     page.keyboard.press("Escape")
                     page.wait_for_timeout(500)
@@ -723,9 +557,6 @@ def download_pdf():
 # ============================================================
 
 def make_schedule(pdf_path):
-    """
-    Открывает скачанный PDF и сохраняет 5 первых страниц как слайды PNG.
-    """
     print("Рендер PDF в PNG...")
     doc = pymupdf.open(pdf_path)
     slides = []
@@ -740,9 +571,7 @@ def make_schedule(pdf_path):
         matrix = pymupdf.Matrix(150 / 72, 150 / 72)
 
         for slide_number in range(1, 6):
-            page_index = slide_number - 1
-            page = doc[page_index]
-
+            page = doc[slide_number - 1]
             pix = page.get_pixmap(
                 matrix=matrix,
                 alpha=False,
@@ -752,9 +581,7 @@ def make_schedule(pdf_path):
             png_path = WORK / f"slide_{slide_number}.png"
             pix.save(str(png_path))
 
-            image_bytes = png_path.read_bytes()
-            image_hash = hashlib.sha256(image_bytes).hexdigest()
-
+            image_hash = hashlib.sha256(png_path.read_bytes()).hexdigest()
             slides.append({
                 "number": slide_number,
                 "path": png_path,
@@ -767,6 +594,56 @@ def make_schedule(pdf_path):
 
     finally:
         doc.close()
+
+
+# ============================================================
+# WARMUP CACHE — загружаем все 5 слайдов в Telegram сразу
+# ============================================================
+
+def warmup_cache(state, slides):
+    """
+    Для каждого слайда, у которого hash изменился (или file_id пуст),
+    отправляет PNG в чат админа, получает file_id, удаляет сообщение.
+    Админ ничего не увидит.
+    """
+    changed = False
+
+    for slide in slides:
+        idx = slide["number"] - 1
+        old = state["latest"]["slides"][idx]
+
+        # Если hash тот же и file_id уже есть — пропускаем
+        if old.get("hash") == slide["hash"] and old.get("file_id"):
+            continue
+
+        # Отправляем в чат админа
+        try:
+            result = send_photo(
+                ADMIN_CHAT_ID,
+                photo_path=slide["path"],
+            )
+
+            # Получаем message_id и file_id
+            message_id = result.get("message_id")
+            photos = result.get("photo", [])
+
+            if photos:
+                new_file_id = photos[-1]["file_id"]
+                state["latest"]["slides"][idx]["file_id"] = new_file_id
+                state["latest"]["slides"][idx]["hash"] = slide["hash"]
+                changed = True
+                print(f"Кэш: слайд {slide['number']} file_id сохранён.")
+            else:
+                print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
+
+            # Удаляем сообщение, чтобы админ его не видел
+            if message_id:
+                delete_message(ADMIN_CHAT_ID, message_id)
+
+        except Exception as e:
+            print(f"Кэш: ошибка загрузки слайда {slide['number']}: {e}")
+
+    return changed
 
 
 # ============================================================
@@ -785,9 +662,6 @@ def send_slide(chat_id, slide_number, slide_path, file_id=None, caption=None):
 # ============================================================
 
 def fulfill_user_requests(state):
-    """
-    Быстрая отправка расписания пользователям из кэша Telegram (за 0.5 сек).
-    """
     changed = False
     users = state["users"]
     slides = state["latest"]["slides"]
@@ -798,7 +672,6 @@ def fulfill_user_requests(state):
 
         selected_class = user.get("class")
         if not selected_class or selected_class not in CLASS_TO_SLIDE:
-            # Сброс плохих состояний
             user["want_schedule"] = False
             changed = True
             continue
@@ -838,22 +711,7 @@ def fulfill_user_requests(state):
 # ============================================================
 
 def broadcast(state, slides, schedule_changed):
-    """
-    Рассылает обновленное расписание пользователям.
-    """
     users = state["users"]
-    old_slides = state["latest"]["slides"]
-
-    for slide in slides:
-        number = slide["number"]
-        index = number - 1
-        old = old_slides[index]
-
-        if old.get("hash") == slide["hash"]:
-            continue
-
-        old["hash"] = slide["hash"]
-        old["file_id"] = None
 
     for user_key, user in list(users.items()):
         try:
@@ -890,7 +748,7 @@ def broadcast(state, slides, schedule_changed):
                 caption = f"Расписание «{selected_class}»"
 
             if cached_file_id:
-                result = send_slide(
+                send_slide(
                     chat_id,
                     slide_number,
                     current_slide["path"],
@@ -898,22 +756,13 @@ def broadcast(state, slides, schedule_changed):
                     caption=caption,
                 )
             else:
-                result = send_slide(
+                send_slide(
                     chat_id,
                     slide_number,
                     current_slide["path"],
                     file_id=None,
                     caption=caption,
                 )
-
-                try:
-                    photo = result.get("photo", [])
-                    if photo:
-                        new_file_id = photo[-1]["file_id"]
-                        state["latest"]["slides"][index]["file_id"] = new_file_id
-                        print(f"Слайд {slide_number}: Telegram file_id сохранён.")
-                except Exception as e:
-                    print(f"Не удалось получить file_id: {e}")
 
             user["sent"] = current_hash
             user["want_schedule"] = False
@@ -950,40 +799,43 @@ def main():
     print("Получение новых сообщений Telegram...")
     state_changed = process_commands(state)
 
-    # 2. Быстро обрабатываем запросы пользователей через кэш
+    # 2. Быстро отвечаем из кэша
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Проверяем, есть ли валидный запрос на расписание, у которого ЕЩЕ НЕТ file_id в кэше
-    needs_yandex_for_missing_cache = False
-    for user_key, user in list(state["users"].items()):
-        if user.get("want_schedule"):
-            cls = user.get("class")
-            if not cls or cls not in CLASS_TO_SLIDE:
-                user["want_schedule"] = False
-                state_changed = True
-                continue
-
-            slide_idx = CLASS_TO_SLIDE[cls] - 1
-            if not state["latest"]["slides"][slide_idx].get("file_id"):
-                needs_yandex_for_missing_cache = True
-
+    # 3. Решаем, идти ли на Яндекс
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Идем в Яндекс ТОЛЬКО если прошло 15 минут ИЛИ если пользователь запросил слайд, которого НЕТ в кэше
+    # Идём на Яндекс если прошло 15 минут
+    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск)
+    needs_yandex = False
+    for user in state["users"].values():
+        if user.get("want_schedule"):
+            cls = user.get("class")
+            if cls and cls in CLASS_TO_SLIDE:
+                idx = CLASS_TO_SLIDE[cls] - 1
+                if not state["latest"]["slides"][idx].get("file_id"):
+                    needs_yandex = True
+                    break
+            else:
+                user["want_schedule"] = False
+                state_changed = True
+
     should_fetch_yandex = (
         time_since_last_check >= YANDEX_CHECK_INTERVAL
-        or needs_yandex_for_missing_cache
+        or needs_yandex
     )
 
     if should_fetch_yandex:
         print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с)...")
         schedule_changed = False
+
         try:
             pdf_path = download_pdf()
             slides = make_schedule(pdf_path)
 
+            # Проверяем, изменилось ли расписание
             for slide in slides:
                 idx = slide["number"] - 1
                 if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
@@ -994,7 +846,13 @@ def main():
             else:
                 print("Расписание не изменилось.")
 
+            # Загружаем все 5 слайдов в кэш Telegram
+            if warmup_cache(state, slides):
+                state_changed = True
+
+            # Рассылаем тем, кому нужно
             broadcast(state, slides, schedule_changed)
+
             state["last_yandex_check"] = now
             state_changed = True
 
@@ -1002,7 +860,7 @@ def main():
             print(f"Ошибка расписания: {e}")
             print("Старое расписание сохранено.")
     else:
-        print(f"Пропуск скачивания с Яндекса (прошло всего {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с)")
+        print(f"Пропуск скачивания с Яндекса (прошло {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с)")
 
     # 4. Сохраняем состояние
     if state_changed:
