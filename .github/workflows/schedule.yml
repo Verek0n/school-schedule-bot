@@ -1,8 +1,6 @@
 name: School Schedule Bot
 
 on:
-  schedule:
-    - cron: '*/3 4-18 * * 1-6'
   workflow_dispatch:
 
 permissions:
@@ -34,7 +32,6 @@ jobs:
 
       - name: Cache Playwright Browsers
         uses: actions/cache@v4
-        id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-v3-${{ hashFiles('requirements.txt') }}
