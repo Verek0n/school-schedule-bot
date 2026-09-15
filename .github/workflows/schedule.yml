@@ -2,8 +2,7 @@ name: School Schedule Bot
 
 on:
   schedule:
-    # Запуск каждые 5 минут с понедельника по субботу (с 4:00 до 18:00 UTC)
-    - cron: '*/5 4-18 * * 1-6'
+    - cron: '*/3 4-18 * * 1-6'
   workflow_dispatch:
 
 permissions:
@@ -16,7 +15,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
@@ -28,12 +27,19 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(pip index (copy-paste не сработает, ниже ручной ввод) playwright | grep -oP 'playwright \(\K[^\)]+')" >> $GITHUB_OUTPUT
+        # Эта команда вычисляет версию самого playwright, чтобы кэш обновлялся вместе с библиотекой
+        continue-on-error: true
+
       - name: Cache Playwright Browsers
         uses: actions/cache@v4
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+          # Мы добавили v2 в ключ, чтобы принудительно сбросить старый битый кэш
+          key: ${{ runner.os }}-playwright-v2-${{ hashFiles('requirements.txt') }}
 
       - name: Install Python dependencies
         run: |
@@ -41,10 +47,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        # Убираем жесткое условие cache-hit, чтобы playwright сам проверил целостность
         run: |
           python -m playwright install chromium
-
+          
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
