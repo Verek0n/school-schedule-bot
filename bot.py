@@ -797,13 +797,13 @@ def fulfill_user_requests(state):
             continue
 
         selected_class = user.get("class")
-        if not selected_class:
+        if not selected_class or selected_class not in CLASS_TO_SLIDE:
+            # Сброс плохих состояний
+            user["want_schedule"] = False
+            changed = True
             continue
 
-        slide_num = CLASS_TO_SLIDE.get(selected_class)
-        if not slide_num:
-            continue
-
+        slide_num = CLASS_TO_SLIDE[selected_class]
         cached = slides[slide_num - 1]
         file_id = cached.get("file_id")
 
@@ -859,13 +859,11 @@ def broadcast(state, slides, schedule_changed):
         try:
             chat_id = int(user_key)
             selected_class = user.get("class")
-            if not selected_class:
+            if not selected_class or selected_class not in CLASS_TO_SLIDE:
+                user["want_schedule"] = False
                 continue
 
-            slide_number = CLASS_TO_SLIDE.get(selected_class)
-            if not slide_number:
-                continue
-
+            slide_number = CLASS_TO_SLIDE[selected_class]
             index = slide_number - 1
             current_slide = slides[index]
             current_hash = current_slide["hash"]
@@ -956,16 +954,27 @@ def main():
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Проверяем, есть ли пользователи, требующие скачивания Яндекса (нет в кэше)
-    has_unfulfilled_users = any(u.get("want_schedule") for u in state["users"].values())
+    # 3. Проверяем, есть ли валидный запрос на расписание, у которого ЕЩЕ НЕТ file_id в кэше
+    needs_yandex_for_missing_cache = False
+    for user_key, user in list(state["users"].items()):
+        if user.get("want_schedule"):
+            cls = user.get("class")
+            if not cls or cls not in CLASS_TO_SLIDE:
+                user["want_schedule"] = False
+                state_changed = True
+                continue
+
+            slide_idx = CLASS_TO_SLIDE[cls] - 1
+            if not state["latest"]["slides"][slide_idx].get("file_id"):
+                needs_yandex_for_missing_cache = True
 
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Идем в Яндекс ТОЛЬКО если прошло 15 минут ИЛИ если пользователь запросил класс, которого еще нет в кэше
+    # Идем в Яндекс ТОЛЬКО если прошло 15 минут ИЛИ если пользователь запросил слайд, которого НЕТ в кэше
     should_fetch_yandex = (
         time_since_last_check >= YANDEX_CHECK_INTERVAL
-        or has_unfulfilled_users
+        or needs_yandex_for_missing_cache
     )
 
     if should_fetch_yandex:
