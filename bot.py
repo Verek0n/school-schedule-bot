@@ -170,7 +170,7 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": False,
+        "one_time_keyboard": True,  # Клавиатура скроется сразу после нажатия
     }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
@@ -468,7 +468,7 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD (ROBUST LOAD & FRAME SEARCH)
+# YANDEX PDF DOWNLOAD
 # ============================================================
 
 def download_pdf():
@@ -509,11 +509,10 @@ def download_pdf():
             return route.continue_()
 
         page.route("**/*", route_filter)
-        
+
         print("Загрузка страницы Яндекса...")
         try:
             page.goto(SOURCE_URL, wait_until="load", timeout=45000)
-            # Ждем прогрузки редактора и фреймов
             page.wait_for_timeout(5000)
         except Exception as e:
             print(f"Предупреждение при переходе по URL: {e}")
@@ -522,7 +521,6 @@ def download_pdf():
 
         for attempt in range(12):
             try:
-                # Сканируем главную страницу + все активные фреймы
                 all_frames = [page] + list(page.frames)
 
                 file_btn = None
@@ -641,7 +639,6 @@ def make_schedule(pdf_path):
         if page_count < 5:
             raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {page_count}.")
 
-        # 200 DPI гарантирует высокое качество текста
         matrix = pymupdf.Matrix(200 / 72, 200 / 72)
 
         for slide_number in range(1, 6):
@@ -671,33 +668,25 @@ def make_schedule(pdf_path):
 
 
 # ============================================================
-# WARMUP CACHE — загружаем все 5 слайдов в Telegram сразу
+# WARMUP CACHE
 # ============================================================
 
 def warmup_cache(state, slides):
-    """
-    Для каждого слайда, у которого hash изменился (или file_id пуст),
-    отправляет JPG в чат админа, получает file_id, удаляет сообщение.
-    Админ ничего не увидит.
-    """
     changed = False
 
     for slide in slides:
         idx = slide["number"] - 1
         old = state["latest"]["slides"][idx]
 
-        # Если hash тот же и file_id уже есть — пропускаем
         if old.get("hash") == slide["hash"] and old.get("file_id"):
             continue
 
-        # Отправляем в чат админа
         try:
             result = send_photo(
                 ADMIN_CHAT_ID,
                 photo_path=slide["path"],
             )
 
-            # Получаем message_id и file_id
             message_id = result.get("message_id")
             photos = result.get("photo", [])
 
@@ -710,7 +699,6 @@ def warmup_cache(state, slides):
             else:
                 print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
 
-            # Удаляем сообщение, чтобы админ его не видел
             if message_id:
                 try:
                     delete_message(ADMIN_CHAT_ID, message_id)
@@ -761,13 +749,14 @@ def fulfill_user_requests(state):
             continue
 
         try:
+            # При отправке расписания прячем клавиатуру полностью (REMOVE_KEYBOARD)
             send_slide(
                 int(user_key),
                 slide_num,
                 None,
                 file_id=file_id,
                 caption=f"Расписание «{selected_class}»",
-                keyboard=class_keyboard(),
+                keyboard=REMOVE_KEYBOARD,
             )
             user["sent"] = cached.get("hash")
             user["want_schedule"] = False
@@ -831,7 +820,7 @@ def broadcast(state, slides, schedule_changed):
                 current_slide["path"],
                 file_id=cached_file_id,
                 caption=caption,
-                keyboard=class_keyboard(),
+                keyboard=REMOVE_KEYBOARD,
             )
 
             user["sent"] = current_hash
@@ -877,8 +866,6 @@ def main():
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Идём на Яндекс если прошло 15 минут
-    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск)
     needs_yandex = False
     for user in state["users"].values():
         if user.get("want_schedule"):
@@ -905,7 +892,6 @@ def main():
             pdf_path = download_pdf()
             slides = make_schedule(pdf_path)
 
-            # Проверяем, изменилось ли расписание
             for slide in slides:
                 idx = slide["number"] - 1
                 if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
@@ -916,11 +902,9 @@ def main():
             else:
                 print("Расписание не изменилось.")
 
-            # Загружаем все 5 слайдов в кэш Telegram
             if warmup_cache(state, slides):
                 state_changed = True
 
-            # Рассылаем тем, кому нужно
             broadcast(state, slides, schedule_changed)
 
             state["last_yandex_check"] = now
