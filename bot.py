@@ -4,7 +4,6 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pymupdf
@@ -47,12 +46,6 @@ session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10))
 
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
-
 # ============================================================
 # CLASS -> SLIDE
 # ============================================================
@@ -88,12 +81,11 @@ def telegram(method, data=None, upload=None):
             files = None
             if upload is not None:
                 upload_path = Path(upload)
-                mime_type = "image/jpeg" if upload_path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
                 files = {
                     "photo": (
                         upload_path.name,
                         upload_path.open("rb"),
-                        mime_type,
+                        "image/png",
                     )
                 }
 
@@ -116,17 +108,20 @@ def telegram(method, data=None, upload=None):
                     )
                 except Exception:
                     retry_after = 5
+
                 print(f"Telegram rate limit, ждём {retry_after} сек.")
                 time.sleep(retry_after)
                 continue
 
             response.raise_for_status()
             result = response.json()
+
             if not result.get("ok"):
                 raise RuntimeError(f"Telegram API error: {result}")
+
             return result["result"]
 
-        except Exception:
+        except Exception as e:
             if attempt == 4:
                 raise
             time.sleep(1)
@@ -174,7 +169,7 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": True,  # Сворачивается сразу после выбора
+        "one_time_keyboard": False,
     }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
@@ -296,9 +291,8 @@ def process_commands(state):
             print(f"Получено сообщение от {chat_id}: {text}")
 
             try:
-                is_admin = (user_key == str(ADMIN_CHAT_ID))
-
                 # АДМИН-РАССЫЛКА: /broadcast <текст> или /объявление <текст>
+                is_admin = (user_key == str(ADMIN_CHAT_ID))
                 if is_admin and (text.startswith("/broadcast ") or text.startswith("/объявление ")):
                     parts = text.split(maxsplit=1)
                     if len(parts) > 1:
@@ -313,23 +307,23 @@ def process_commands(state):
                             try:
                                 send_message(int(sub_id), broadcast_text)
                                 success_count += 1
-                                time.sleep(0.03)
+                                time.sleep(0.05)  # небольшая задержка от лимитов спама
                             except requests.HTTPError as e:
                                 if e.response is not None and e.response.status_code in (403, 400):
-                                    print(f"Удаляем пользователя {sub_id} (заблокировал бота).")
+                                    print(f"Удаляем пользователя {sub_id} (заблокировал бота во время рассылки).")
                                     if sub_id in state["users"]:
                                         del state["users"][sub_id]
                                         changed = True
                                     fail_count += 1
                                 else:
-                                    print(f"Не удалось отправить {sub_id}: {e}")
+                                    print(f"Не удалось отправить пользователю {sub_id}: {e}")
                                     fail_count += 1
                             except Exception as e:
-                                print(f"Ошибка отправки {sub_id}: {e}")
+                                print(f"Ошибка отправки пользователю {sub_id}: {e}")
                                 fail_count += 1
 
                         send_message(
-                            chat_id,
+                            chat_id, 
                             f"Рассылка завершена.\nУспешно: {success_count}\nОшибок/Удалено: {fail_count}"
                         )
                     else:
@@ -405,11 +399,12 @@ def process_commands(state):
                     else:
                         user["want_schedule"] = True
                         changed = True
+                        # Текстовое сообщение убрано, бот сразу отправит фото из кэша или после загрузки
                     continue
 
                 # /stats
                 if text == "/stats":
-                    if user_key == "1334717692":
+                    if user_key == str(ADMIN_CHAT_ID):
                         subscribers = state.get("users", {})
                         total = len(subscribers)
                         with_class = sum(1 for u in subscribers.values() if u.get("class"))
@@ -425,7 +420,7 @@ def process_commands(state):
                         send_message(chat_id, "\n".join(lines))
                         continue
 
-                # CLASS BUTTON
+                # КНОПКА ВЫБОРА КЛАССА
                 if text in CLASS_TO_SLIDE:
                     if user_key not in state["users"]:
                         state["users"][user_key] = {
@@ -442,13 +437,14 @@ def process_commands(state):
                     changed = True
 
                     print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
+                    # Текстовое подтверждение убрано, бот сразу пришлет фото расписания
                     continue
 
-                # UNKNOWN
+                # НЕИЗВЕСТНАЯ КОМАНДА
                 send_message(
                     chat_id,
                     (
-                        "Это конечно прикольно, но я умею только:\n"
+                        "Я умею только выполнять команды:\n"
                         "/schedule - Получить расписание\n"
                         "/class - Изменить свой класс\n"
                         "/start - Подписаться на расписание\n"
@@ -458,8 +454,9 @@ def process_commands(state):
                 )
 
             except requests.HTTPError as e:
+                # Если пользователь заблокировал бота, удаляем его из БД
                 if e.response is not None and e.response.status_code in (403, 400):
-                    print(f"Пользователь {chat_id} заблокировал бота. Удаляем из состояния.")
+                    print(f"Пользователь {chat_id} заблокировал бота (403/400). Удаляем из состояния.")
                     if user_key in state["users"]:
                         del state["users"][user_key]
                         changed = True
@@ -472,8 +469,28 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD (TARGETED IFRAME WAIT & CLICK)
+# YANDEX PDF DOWNLOAD
 # ============================================================
+
+def _find_element(page, candidates):
+    roots = [page] + list(page.frames)
+    for root in roots:
+        for item in candidates:
+            try:
+                if isinstance(item, tuple):
+                    role, pattern = item
+                    loc = root.get_by_role(role, name=pattern)
+                elif isinstance(item, str):
+                    loc = root.get_by_text(item, exact=False)
+                else:
+                    loc = root.get_by_text(item)
+
+                if loc.count() > 0 and loc.first.is_visible():
+                    return loc.first
+            except Exception:
+                continue
+    return None
+
 
 def download_pdf():
     target = WORK / "source.pdf"
@@ -481,7 +498,6 @@ def download_pdf():
         target.unlink()
 
     print("Скачивание расписания в формате PDF через браузер...")
-    t0 = time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -497,142 +513,103 @@ def download_pdf():
         context = browser.new_context(
             accept_downloads=True,
             locale="ru-RU",
-            user_agent=UA,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
             viewport={"width": 1920, "height": 1080},
         )
 
         page = context.new_page()
 
-        # Маскировка под обычный Chrome
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = { runtime: {} };
-        """)
-
         def route_filter(route):
             url = route.request.url
-            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru"]):
+            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
                 return route.abort()
             return route.continue_()
 
         page.route("**/*", route_filter)
-
-        print("Открытие страницы Яндекса...")
-        try:
-            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            print(f"Предупреждение при переходе по URL: {e}")
-
-        # Цикл ожидания монтирования фрейма редактора и появление меню "Файл" (до 30 сек)
-        target_frame = None
-        file_element = None
-
-        print("Ожидание полной загрузки редактора Яндекса...")
-        start_wait = time.time()
-        while time.time() - start_wait < 30:
-            for frame in page.frames:
-                try:
-                    loc = frame.get_by_text("Файл", exact=True)
-                    if loc.count() > 0:
-                        target_frame = frame
-                        file_element = loc.first
-                        print(f"Редактор прогружен! Найден фрейм с меню 'Файл': {frame.url}")
-                        break
-                    loc_reg = frame.get_by_text(re.compile(r"^Файл$", re.I))
-                    if loc_reg.count() > 0:
-                        target_frame = frame
-                        file_element = loc_reg.first
-                        print(f"Редактор прогружен! Найден фрейм (regex): {frame.url}")
-                        break
-                except Exception:
-                    pass
-            if file_element:
-                break
-            page.wait_for_timeout(1500)
-
-        if not target_frame or not file_element:
-            browser.close()
-            raise RuntimeError("Редактор Яндекса не загрузился за 30 секунд (меню 'Файл' не найдено).")
+        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
 
         download_ok = False
 
-        try:
-            # 1. Клик по "Файл"
-            print("1. Клик по меню 'Файл'...")
-            file_element.click(force=True, timeout=5000)
-            page.wait_for_timeout(1000)
+        for _ in range(8):
+            try:
+                file_btn = _find_element(page, [
+                    ("button", re.compile(r"^Файл$", re.I)),
+                    ("menuitem", re.compile(r"^Файл$", re.I)),
+                    re.compile(r"^Файл$", re.I),
+                    "Файл",
+                ])
+                if not file_btn:
+                    page.wait_for_timeout(1000)
+                    continue
 
-            # 2. Поиск и наведение на "Скачать"
-            print("2. Поиск пункта 'Скачать'...")
-            dl_element = None
-            for frame in page.frames:
+                file_btn.click(timeout=3000)
+
+                download_btn = _find_element(page, [
+                    ("menuitem", re.compile(r"Скачать", re.I)),
+                    ("button", re.compile(r"Скачать", re.I)),
+                    re.compile(r"Скачать", re.I),
+                    "Скачать",
+                ])
+                if not download_btn:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
+                    continue
+
                 try:
-                    loc = frame.get_by_text(re.compile(r"Скачать", re.I))
-                    if loc.count() > 0:
-                        dl_element = loc.first
-                        break
+                    download_btn.hover(timeout=2000)
+                    download_btn.click(timeout=2000)
                 except Exception:
                     pass
 
-            if dl_element:
-                try:
-                    dl_element.hover(force=True, timeout=2000)
-                except Exception:
-                    pass
-                try:
-                    dl_element.click(force=True, timeout=2000)
-                except Exception:
-                    pass
+                pdf_btn = _find_element(page, [
+                    ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
+                    ("button", re.compile(r"PDF|\.pdf", re.I)),
+                    re.compile(r"Документ PDF|\.pdf|PDF", re.I),
+                    ".pdf",
+                ])
+                if not pdf_btn:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
+                    continue
 
-            page.wait_for_timeout(1000)
+                print("Ожидание скачивания PDF...")
+                with page.expect_download(timeout=25000) as download_info:
+                    pdf_btn.click(timeout=4000, force=True)
 
-            # 3. Поиск пункта "Документ PDF" и перехват скачивания
-            print("3. Поиск пункта 'Документ PDF' и запуск скачивания...")
-            pdf_element = None
-            for frame in page.frames:
-                try:
-                    loc = frame.get_by_text(re.compile(r"Документ PDF|\.pdf", re.I))
-                    if loc.count() > 0:
-                        pdf_element = loc.first
-                        break
-                except Exception:
-                    pass
+                download = download_info.value
+                if download.failure():
+                    raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
 
-            if not pdf_element:
-                raise RuntimeError("Пункт меню 'Документ PDF' не появился во фреймах.")
+                download.save_as(target)
+                print(f"PDF скачан: {target}")
+                download_ok = True
+                break
 
-            with page.expect_download(timeout=35000) as download_info:
-                pdf_element.click(force=True, timeout=5000)
-
-            download = download_info.value
-            if download.failure():
-                raise RuntimeError(f"Ошибка при скачивании файла: {download.failure()}")
-
-            download.save_as(target)
-            download_ok = True
-            print("PDF успешно скачан из Яндекса!")
-
-        except Exception as e:
-            print(f"Ошибка скачивания через UI: {e}")
+            except Exception:
+                page.wait_for_timeout(1000)
 
         browser.close()
 
         if not download_ok or not target.exists():
-            raise RuntimeError("Не удалось скачать PDF через интерфейс Яндекса.")
+            raise RuntimeError("Не удалось скачать PDF.")
 
-    if target.stat().st_size < 5000:
-        raise RuntimeError(f"Скачанный PDF слишком мал ({target.stat().st_size} байт).")
+    if target.stat().st_size < 1000:
+        raise RuntimeError("Скачанный PDF слишком мал.")
 
-    print(f"PDF успешно скачан и проверен ({target.stat().st_size} байт, за {time.time() - t0:.1f}с).")
+    print("PDF успешно проверен.")
     return target
 
 
 # ============================================================
-# PDF -> 5 JPG (HIGH QUALITY 200 DPI)
+# PDF -> 5 PNG
 # ============================================================
 
 def make_schedule(pdf_path):
-    print("Рендер PDF в JPG (200 DPI)...")
+    print("Рендер PDF в PNG...")
     doc = pymupdf.open(pdf_path)
     slides = []
 
@@ -641,9 +618,9 @@ def make_schedule(pdf_path):
         print(f"В PDF найдено страниц: {page_count}")
 
         if page_count < 5:
-            raise RuntimeError(f"Скачанный PDF содержит только {page_count} страниц (ожидалось минимум 5).")
+            raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {page_count}.")
 
-        matrix = pymupdf.Matrix(200 / 72, 200 / 72)
+        matrix = pymupdf.Matrix(150 / 72, 150 / 72)
 
         for slide_number in range(1, 6):
             page = doc[slide_number - 1]
@@ -653,17 +630,17 @@ def make_schedule(pdf_path):
                 colorspace=pymupdf.csRGB,
             )
 
-            jpg_path = WORK / f"slide_{slide_number}.jpg"
-            pix.save(str(jpg_path), jpg_quality=95)
+            png_path = WORK / f"slide_{slide_number}.png"
+            pix.save(str(png_path))
 
-            image_hash = hashlib.sha256(jpg_path.read_bytes()).hexdigest()
+            image_hash = hashlib.sha256(png_path.read_bytes()).hexdigest()
             slides.append({
                 "number": slide_number,
-                "path": jpg_path,
+                "path": png_path,
                 "hash": image_hash,
             })
 
-            print(f"Слайд {slide_number}: {jpg_path.name}, hash={image_hash[:12]}")
+            print(f"Слайд {slide_number}: {png_path.name}, hash={image_hash[:12]}")
 
         return slides
 
@@ -676,21 +653,29 @@ def make_schedule(pdf_path):
 # ============================================================
 
 def warmup_cache(state, slides):
+    """
+    Для каждого слайда, у которого hash изменился (или file_id пуст),
+    отправляет PNG в чат админа, получает file_id, удаляет сообщение.
+    Админ ничего не увидит.
+    """
     changed = False
 
     for slide in slides:
         idx = slide["number"] - 1
         old = state["latest"]["slides"][idx]
 
+        # Если hash тот же и file_id уже есть — пропускаем
         if old.get("hash") == slide["hash"] and old.get("file_id"):
             continue
 
+        # Отправляем в чат админа
         try:
             result = send_photo(
                 ADMIN_CHAT_ID,
                 photo_path=slide["path"],
             )
 
+            # Получаем message_id и file_id
             message_id = result.get("message_id")
             photos = result.get("photo", [])
 
@@ -703,11 +688,9 @@ def warmup_cache(state, slides):
             else:
                 print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
 
+            # Удаляем сообщение, чтобы админ его не видел
             if message_id:
-                try:
-                    delete_message(ADMIN_CHAT_ID, message_id)
-                except Exception:
-                    pass
+                delete_message(ADMIN_CHAT_ID, message_id)
 
         except Exception as e:
             print(f"Кэш: ошибка загрузки слайда {slide['number']}: {e}")
@@ -759,7 +742,7 @@ def fulfill_user_requests(state):
                 None,
                 file_id=file_id,
                 caption=f"Расписание «{selected_class}»",
-                keyboard=REMOVE_KEYBOARD,
+                keyboard=class_keyboard()
             )
             user["sent"] = cached.get("hash")
             user["want_schedule"] = False
@@ -817,14 +800,24 @@ def broadcast(state, slides, schedule_changed):
             else:
                 caption = f"Расписание «{selected_class}»"
 
-            send_slide(
-                chat_id,
-                slide_number,
-                current_slide["path"],
-                file_id=cached_file_id,
-                caption=caption,
-                keyboard=REMOVE_KEYBOARD,
-            )
+            if cached_file_id:
+                send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=cached_file_id,
+                    caption=caption,
+                    keyboard=class_keyboard(),
+                )
+            else:
+                send_slide(
+                    chat_id,
+                    slide_number,
+                    current_slide["path"],
+                    file_id=None,
+                    caption=caption,
+                    keyboard=class_keyboard(),
+                )
 
             user["sent"] = current_hash
             user["want_schedule"] = False
@@ -865,17 +858,12 @@ def main():
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Решаем, идти ли на Яндекс (проверка с 12:00 до 03:00 МСК)
+    # 3. Решаем, идти ли на Яндекс
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Часовой пояс Москвы (UTC+3)
-    msk_tz = timezone(timedelta(hours=3))
-    now_msk = datetime.now(msk_tz)
-
-    # Активные часы: с 12:00 дня до 03:00 ночи МСК (т.е. часы 12..23 и 0, 1, 2)
-    is_active_hours = (now_msk.hour >= 12 or now_msk.hour < 3)
-
+    # Идём на Яндекс если прошло 15 минут
+    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск)
     needs_yandex = False
     for user in state["users"].values():
         if user.get("want_schedule"):
@@ -889,24 +877,20 @@ def main():
                 user["want_schedule"] = False
                 state_changed = True
 
-    should_fetch_yandex = is_active_hours and (
+    should_fetch_yandex = (
         time_since_last_check >= YANDEX_CHECK_INTERVAL
         or needs_yandex
     )
 
-    if not is_active_hours:
-        print(
-            f"Пропуск скачивания с Яндекса: сейчас {now_msk.strftime('%H:%M')} МСК "
-            f"(проверка работает только с 12:00 до 03:00 МСК)."
-        )
-    elif should_fetch_yandex:
-        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с, время {now_msk.strftime('%H:%M')} МСК)...")
+    if should_fetch_yandex:
+        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с)...")
         schedule_changed = False
 
         try:
             pdf_path = download_pdf()
             slides = make_schedule(pdf_path)
 
+            # Проверяем, изменилось ли расписание
             for slide in slides:
                 idx = slide["number"] - 1
                 if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
@@ -917,9 +901,11 @@ def main():
             else:
                 print("Расписание не изменилось.")
 
+            # Загружаем все 5 слайдов в кэш Telegram
             if warmup_cache(state, slides):
                 state_changed = True
 
+            # Рассылаем тем, кому нужно
             broadcast(state, slides, schedule_changed)
 
             state["last_yandex_check"] = now
