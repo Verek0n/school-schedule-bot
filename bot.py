@@ -22,12 +22,13 @@ SOURCE_URL = (
     "zQH249qvBK21O7SXl-9z_SPegnqahzm72s0qoIz-cKg6eG1uRGNFdE5adw"
 )
 
-DOC_KEY = "zQH249qvBK21O7SXl-9z_SPegnqahzm72s0qoIz-cKg6eG1uRGNFdE5adw"
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STATE_TOKEN = os.environ["STATE_TOKEN"]
 
+# В чат админа отправляем фото для получения file_id, затем удаляем
 ADMIN_CHAT_ID = 1334717692
+
+# Интервал проверки Яндекса: 900 секунд = 15 минут
 YANDEX_CHECK_INTERVAL = 900
 
 STATE_REPO = "Verek0n/school-schedule-state"
@@ -173,9 +174,8 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": True,
+        "one_time_keyboard": True,  # Сворачивается сразу после выбора
     }
-
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
 
@@ -298,6 +298,7 @@ def process_commands(state):
             try:
                 is_admin = (user_key == str(ADMIN_CHAT_ID))
 
+                # АДМИН-РАССЫЛКА: /broadcast <текст> или /объявление <текст>
                 if is_admin and (text.startswith("/broadcast ") or text.startswith("/объявление ")):
                     parts = text.split(maxsplit=1)
                     if len(parts) > 1:
@@ -316,8 +317,9 @@ def process_commands(state):
                             except requests.HTTPError as e:
                                 if e.response is not None and e.response.status_code in (403, 400):
                                     print(f"Удаляем пользователя {sub_id} (заблокировал бота).")
-                                    state["users"].pop(sub_id, None)
-                                    changed = True
+                                    if sub_id in state["users"]:
+                                        del state["users"][sub_id]
+                                        changed = True
                                     fail_count += 1
                                 else:
                                     print(f"Не удалось отправить {sub_id}: {e}")
@@ -328,12 +330,13 @@ def process_commands(state):
 
                         send_message(
                             chat_id,
-                            f"Рассылка завершена.\nУспешно: {success_count}\nОшибок/Удалено: {fail_count}",
+                            f"Рассылка завершена.\nУспешно: {success_count}\nОшибок/Удалено: {fail_count}"
                         )
                     else:
                         send_message(chat_id, "Использование: /broadcast <текст уведомления>")
                     continue
 
+                # /start
                 if text == "/start":
                     if user_key not in state["users"]:
                         state["users"][user_key] = {
@@ -364,10 +367,12 @@ def process_commands(state):
                         )
                     continue
 
+                # /stop
                 if text == "/stop":
                     if user_key in state["users"]:
                         del state["users"][user_key]
                         changed = True
+
                     send_message(
                         chat_id,
                         "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
@@ -375,10 +380,12 @@ def process_commands(state):
                     )
                     continue
 
+                # /class
                 if text == "/class":
                     send_message(chat_id, "Выберите класс:", class_keyboard())
                     continue
 
+                # /schedule
                 if text == "/schedule":
                     if user_key not in state["users"]:
                         state["users"][user_key] = {
@@ -400,24 +407,25 @@ def process_commands(state):
                         changed = True
                     continue
 
+                # /stats
                 if text == "/stats":
                     if user_key == "1334717692":
                         subscribers = state.get("users", {})
                         total = len(subscribers)
                         with_class = sum(1 for u in subscribers.values() if u.get("class"))
                         without_class = total - with_class
-                        send_message(
-                            chat_id,
-                            "\n".join([
-                                "Статистика бота",
-                                "",
-                                f"Всего пользователей: {total}",
-                                f"С выбранным классом: {with_class}",
-                                f"Без класса: {without_class}",
-                            ]),
-                        )
-                    continue
 
+                        lines = [
+                            "Статистика бота",
+                            "",
+                            f"Всего пользователей: {total}",
+                            f"С выбранным классом: {with_class}",
+                            f"Без класса: {without_class}",
+                        ]
+                        send_message(chat_id, "\n".join(lines))
+                        continue
+
+                # CLASS BUTTON
                 if text in CLASS_TO_SLIDE:
                     if user_key not in state["users"]:
                         state["users"][user_key] = {
@@ -432,9 +440,11 @@ def process_commands(state):
                     user["sent"] = None
                     user["want_schedule"] = True
                     changed = True
+
                     print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
                     continue
 
+                # UNKNOWN
                 send_message(
                     chat_id,
                     (
@@ -462,71 +472,16 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX DOWNLOAD — НОВАЯ СХЕМА
+# YANDEX PDF DOWNLOAD (TARGETED IFRAME WAIT & CLICK)
 # ============================================================
-
-def _save_pdf(target: Path, data: bytes) -> bool:
-    if not data or len(data) < 1000 or not data.startswith(b"%PDF"):
-        return False
-    target.write_bytes(data)
-    return True
-
-
-def _try_direct_urls(target: Path) -> bool:
-    """Прямые URL-варианты без браузера."""
-    print("Этап 1: прямые URL / cloud API...")
-
-    candidates = [
-        f"https://disk.yandex.ru/i/{DOC_KEY}",
-        f"https://disk.yandex.ru/d/{DOC_KEY}",
-        f"https://yadi.sk/i/{DOC_KEY}",
-        f"https://yadi.sk/d/{DOC_KEY}",
-    ]
-
-    # Cloud public download API
-    api = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-    for public_key in candidates + [DOC_KEY, SOURCE_URL]:
-        try:
-            r = session.get(api, params={"public_key": public_key}, timeout=8, headers={"User-Agent": UA})
-            if r.status_code == 200:
-                href = r.json().get("href")
-                if href:
-                    f = session.get(href, timeout=20, headers={"User-Agent": UA})
-                    if _save_pdf(target, f.content):
-                        print(f"PDF через Cloud API ({public_key[:40]}...)")
-                        return True
-        except Exception:
-            pass
-
-    # Иногда docs отдаёт export по таким путям
-    export_urls = [
-        f"https://docs.yandex.ru/docs/api/v1/export?id={DOC_KEY}&format=pdf",
-        f"https://docviewer.yandex.ru/?url=ya-disk-public%3A%2F%2F{DOC_KEY}&c=export&format=pdf",
-    ]
-    for url in export_urls:
-        try:
-            r = session.get(url, timeout=15, headers={"User-Agent": UA, "Referer": SOURCE_URL}, allow_redirects=True)
-            if _save_pdf(target, r.content):
-                print(f"PDF через export URL: {url[:60]}")
-                return True
-        except Exception:
-            pass
-
-    return False
-
 
 def download_pdf():
     target = WORK / "source.pdf"
     if target.exists():
         target.unlink()
 
+    print("Скачивание расписания в формате PDF через браузер...")
     t0 = time.time()
-
-    if _try_direct_urls(target):
-        print(f"PDF готов за {time.time() - t0:.1f}с")
-        return target
-
-    print("Этап 2: Playwright (UI + print-to-PDF + network)...")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -538,257 +493,142 @@ def download_pdf():
                 "--disable-blink-features=AutomationControlled",
             ],
         )
+
         context = browser.new_context(
             accept_downloads=True,
             locale="ru-RU",
             user_agent=UA,
             viewport={"width": 1920, "height": 1080},
         )
+
         page = context.new_page()
+
+        # Маскировка под обычный Chrome
         page.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             window.chrome = { runtime: {} };
         """)
 
-        pdf_hits = []
-
-        def on_response(response):
-            try:
-                headers = {k.lower(): v for k, v in response.headers.items()}
-                ctype = headers.get("content-type", "")
-                disp = headers.get("content-disposition", "")
-                url = response.url.lower()
-                if response.status != 200:
-                    return
-                looks = (
-                    "application/pdf" in ctype
-                    or url.endswith(".pdf")
-                    or ".pdf?" in url
-                    or ("filename=" in disp and ".pdf" in disp)
-                )
-                if not looks:
-                    return
-                body = response.body()
-                if body and body.startswith(b"%PDF") and len(body) > 1000:
-                    pdf_hits.append(body)
-                    print(f"Network intercept: PDF {len(body)} байт")
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
         def route_filter(route):
             url = route.request.url
-            if any(x in url for x in ("mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru")):
+            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru"]):
                 return route.abort()
             return route.continue_()
 
         page.route("**/*", route_filter)
 
+        print("Открытие страницы Яндекса...")
         try:
-            page.goto(SOURCE_URL, wait_until="load", timeout=60000)
+            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
         except Exception as e:
-            print(f"goto warning: {e}")
+            print(f"Предупреждение при переходе по URL: {e}")
 
-        page.wait_for_timeout(5000)
+        # Цикл ожидания монтирования фрейма редактора и появление меню "Файл" (до 30 сек)
+        target_frame = None
+        file_element = None
 
-        # ---- ДИАГНОСТИКА: что реально видит Actions ----
-        try:
-            title = page.title()
-            url_now = page.url
-            n_frames = len(page.frames)
-            body_text = page.evaluate("""() => (document.body && document.body.innerText || '').slice(0, 800)""")
-            btn_texts = page.evaluate("""
-                () => Array.from(document.querySelectorAll('button, a, [role="button"], [role="menuitem"]'))
-                    .map(e => (e.innerText || e.getAttribute('aria-label') || '').trim())
-                    .filter(Boolean)
-                    .slice(0, 40)
-            """)
-            print(f"DIAG title={title!r}")
-            print(f"DIAG url={url_now}")
-            print(f"DIAG frames={n_frames}")
-            print(f"DIAG buttons={btn_texts}")
-            print(f"DIAG body[:800]={body_text!r}")
-            page.screenshot(path=str(WORK / "debug.png"), full_page=True)
-            print(f"DIAG screenshot -> {WORK / 'debug.png'}")
-        except Exception as e:
-            print(f"DIAG error: {e}")
+        print("Ожидание полной загрузки редактора Яндекса...")
+        start_wait = time.time()
+        while time.time() - start_wait < 30:
+            for frame in page.frames:
+                try:
+                    loc = frame.get_by_text("Файл", exact=True)
+                    if loc.count() > 0:
+                        target_frame = frame
+                        file_element = loc.first
+                        print(f"Редактор прогружен! Найден фрейм с меню 'Файл': {frame.url}")
+                        break
+                    loc_reg = frame.get_by_text(re.compile(r"^Файл$", re.I))
+                    if loc_reg.count() > 0:
+                        target_frame = frame
+                        file_element = loc_reg.first
+                        print(f"Редактор прогружен! Найден фрейм (regex): {frame.url}")
+                        break
+                except Exception:
+                    pass
+            if file_element:
+                break
+            page.wait_for_timeout(1500)
 
-        if pdf_hits and _save_pdf(target, pdf_hits[-1]):
+        if not target_frame or not file_element:
             browser.close()
-            print(f"PDF из network intercept, {time.time() - t0:.1f}с")
-            return target
-
-        # ---- UI: Файл → Скачать → PDF ----
-        def find_el(patterns):
-            roots = [page] + list(page.frames)
-            for root in roots:
-                for pat in patterns:
-                    try:
-                        loc = root.get_by_text(pat, exact=False)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            return loc.first
-                    except Exception:
-                        pass
-                    try:
-                        loc = root.get_by_role("button", name=pat)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            return loc.first
-                    except Exception:
-                        pass
-                    try:
-                        loc = root.get_by_role("menuitem", name=pat)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            return loc.first
-                    except Exception:
-                        pass
-            return None
+            raise RuntimeError("Редактор Яндекса не загрузился за 30 секунд (меню 'Файл' не найдено).")
 
         download_ok = False
-        for attempt in range(8):
-            if pdf_hits and _save_pdf(target, pdf_hits[-1]):
-                download_ok = True
-                break
-            try:
-                file_btn = find_el([re.compile(r"^Файл$", re.I), "Файл"])
-                if not file_btn:
-                    print(f"UI attempt {attempt+1}: нет 'Файл'")
-                    page.wait_for_timeout(1500)
-                    continue
 
-                print("UI: клик Файл")
-                file_btn.click(force=True, timeout=3000)
-                page.wait_for_timeout(700)
+        try:
+            # 1. Клик по "Файл"
+            print("1. Клик по меню 'Файл'...")
+            file_element.click(force=True, timeout=5000)
+            page.wait_for_timeout(1000)
 
-                dl = find_el([re.compile(r"Скачать", re.I), "Скачать"])
-                if not dl:
-                    page.keyboard.press("Escape")
-                    continue
-                print("UI: Скачать")
+            # 2. Поиск и наведение на "Скачать"
+            print("2. Поиск пункта 'Скачать'...")
+            dl_element = None
+            for frame in page.frames:
                 try:
-                    dl.hover(timeout=1500)
-                except Exception:
-                    pass
-                try:
-                    dl.click(force=True, timeout=2000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(700)
-
-                pdf_btn = find_el([
-                    re.compile(r"Документ PDF", re.I),
-                    re.compile(r"PDF|\.pdf", re.I),
-                    ".pdf",
-                ])
-                if not pdf_btn:
-                    page.keyboard.press("Escape")
-                    continue
-
-                print("UI: PDF download...")
-                with page.expect_download(timeout=25000) as info:
-                    pdf_btn.click(force=True, timeout=4000)
-                d = info.value
-                if not d.failure():
-                    d.save_as(target)
-                    if target.exists() and target.stat().st_size >= 1000:
-                        download_ok = True
-                        print("UI: PDF скачан")
+                    loc = frame.get_by_text(re.compile(r"Скачать", re.I))
+                    if loc.count() > 0:
+                        dl_element = loc.first
                         break
-            except Exception as e:
-                print(f"UI attempt {attempt+1} err: {e}")
-                try:
-                    page.keyboard.press("Escape")
                 except Exception:
                     pass
-                page.wait_for_timeout(1000)
 
-        # ---- FALLBACK: Chromium print-to-PDF (не нужно меню Файл) ----
-        if not download_ok:
-            print("Этап 3: page.pdf() print-to-PDF fallback...")
-            try:
-                # Прячем тулбары, чтобы в PDF было больше документа
-                page.evaluate("""
-                    () => {
-                      document.querySelectorAll('header, nav, [class*="toolbar"], [class*="header"]')
-                        .forEach(e => { try { e.style.display = 'none'; } catch(x){} });
-                    }
-                """)
-                page.wait_for_timeout(500)
-                pdf_bytes = page.pdf(
-                    print_background=True,
-                    prefer_css_page_size=True,
-                    landscape=True,
-                    margin={"top": "5mm", "bottom": "5mm", "left": "5mm", "right": "5mm"},
-                )
-                if _save_pdf(target, pdf_bytes):
-                    download_ok = True
-                    print(f"page.pdf() OK ({len(pdf_bytes)} байт)")
-                else:
-                    # Иногда chromium pdf валидный но проверка strict — всё равно сохраним если большой
-                    if pdf_bytes and len(pdf_bytes) > 5000:
-                        target.write_bytes(pdf_bytes)
-                        download_ok = True
-                        print(f"page.pdf() saved raw ({len(pdf_bytes)} байт)")
-            except Exception as e:
-                print(f"page.pdf() fail: {e}")
+            if dl_element:
+                try:
+                    dl_element.hover(force=True, timeout=2000)
+                except Exception:
+                    pass
+                try:
+                    dl_element.click(force=True, timeout=2000)
+                except Exception:
+                    pass
 
-        # ---- FALLBACK 2: скриншоты страниц документа как «псевдо-PDF» ----
-        # Если и это не PDF — make_schedule умеет открыть PDF; для скринов
-        # сохраним multipage PDF через pymupdf из картинок.
-        if not download_ok:
-            print("Этап 4: скриншоты документа → PDF...")
-            try:
-                shots = []
-                # Пробуем кликать по страницам / скроллить
-                for i in range(5):
-                    shot = WORK / f"page_shot_{i+1}.png"
-                    # Ищем область документа
-                    try:
-                        page.screenshot(path=str(shot), full_page=False)
-                        shots.append(shot)
-                    except Exception:
+            page.wait_for_timeout(1000)
+
+            # 3. Поиск пункта "Документ PDF" и перехват скачивания
+            print("3. Поиск пункта 'Документ PDF' и запуск скачивания...")
+            pdf_element = None
+            for frame in page.frames:
+                try:
+                    loc = frame.get_by_text(re.compile(r"Документ PDF|\.pdf", re.I))
+                    if loc.count() > 0:
+                        pdf_element = loc.first
                         break
-                    # Page Down / next page
-                    page.keyboard.press("PageDown")
-                    page.wait_for_timeout(800)
+                except Exception:
+                    pass
 
-                if len(shots) >= 1:
-                    doc = pymupdf.open()
-                    for shot in shots:
-                        img = pymupdf.open(str(shot))
-                        rect = img[0].rect
-                        pdf_page = doc.new_page(width=rect.width, height=rect.height)
-                        pdf_page.insert_image(rect, filename=str(shot))
-                        img.close()
-                    doc.save(str(target))
-                    doc.close()
-                    if target.exists() and target.stat().st_size > 1000:
-                        download_ok = True
-                        print(f"Скриншоты→PDF OK, страниц: {len(shots)}")
-            except Exception as e:
-                print(f"screenshot fallback fail: {e}")
+            if not pdf_element:
+                raise RuntimeError("Пункт меню 'Документ PDF' не появился во фреймах.")
 
-        if not download_ok and pdf_hits:
-            _save_pdf(target, pdf_hits[-1])
-            download_ok = target.exists()
+            with page.expect_download(timeout=35000) as download_info:
+                pdf_element.click(force=True, timeout=5000)
+
+            download = download_info.value
+            if download.failure():
+                raise RuntimeError(f"Ошибка при скачивании файла: {download.failure()}")
+
+            download.save_as(target)
+            download_ok = True
+            print("PDF успешно скачан из Яндекса!")
+
+        except Exception as e:
+            print(f"Ошибка скачивания через UI: {e}")
 
         browser.close()
 
         if not download_ok or not target.exists():
-            raise RuntimeError(
-                "Не удалось скачать PDF. Смотри DIAG-логи выше: "
-                "если body пустой/капча/логин — Яндекс режет GitHub Actions IP."
-            )
+            raise RuntimeError("Не удалось скачать PDF через интерфейс Яндекса.")
 
-    if target.stat().st_size < 1000:
-        raise RuntimeError("Скачанный PDF слишком мал.")
+    if target.stat().st_size < 5000:
+        raise RuntimeError(f"Скачанный PDF слишком мал ({target.stat().st_size} байт).")
 
-    print(f"PDF готов ({target.stat().st_size} байт, {time.time() - t0:.1f}с)")
+    print(f"PDF успешно скачан и проверен ({target.stat().st_size} байт, за {time.time() - t0:.1f}с).")
     return target
 
 
 # ============================================================
-# PDF -> 5 JPG
+# PDF -> 5 JPG (HIGH QUALITY 200 DPI)
 # ============================================================
 
 def make_schedule(pdf_path):
@@ -800,14 +640,18 @@ def make_schedule(pdf_path):
         page_count = len(doc)
         print(f"В PDF найдено страниц: {page_count}")
 
-        # Если страниц меньше 5 (print/screenshot fallback) — дублируем последнюю
-        use_count = max(page_count, 1)
+        if page_count < 5:
+            raise RuntimeError(f"Скачанный PDF содержит только {page_count} страниц (ожидалось минимум 5).")
+
         matrix = pymupdf.Matrix(200 / 72, 200 / 72)
 
         for slide_number in range(1, 6):
-            src_index = min(slide_number - 1, use_count - 1)
-            page = doc[src_index]
-            pix = page.get_pixmap(matrix=matrix, alpha=False, colorspace=pymupdf.csRGB)
+            page = doc[slide_number - 1]
+            pix = page.get_pixmap(
+                matrix=matrix,
+                alpha=False,
+                colorspace=pymupdf.csRGB,
+            )
 
             jpg_path = WORK / f"slide_{slide_number}.jpg"
             pix.save(str(jpg_path), jpg_quality=95)
@@ -818,51 +662,73 @@ def make_schedule(pdf_path):
                 "path": jpg_path,
                 "hash": image_hash,
             })
+
             print(f"Слайд {slide_number}: {jpg_path.name}, hash={image_hash[:12]}")
 
-        if page_count < 5:
-            print(f"Внимание: в источнике {page_count} стр., для 5 слайдов использовано дополнение.")
-
         return slides
+
     finally:
         doc.close()
 
 
 # ============================================================
-# CACHE / SEND / BROADCAST
+# WARMUP CACHE — загружаем все 5 слайдов в Telegram сразу
 # ============================================================
 
 def warmup_cache(state, slides):
     changed = False
+
     for slide in slides:
         idx = slide["number"] - 1
         old = state["latest"]["slides"][idx]
+
         if old.get("hash") == slide["hash"] and old.get("file_id"):
             continue
+
         try:
-            result = send_photo(ADMIN_CHAT_ID, photo_path=slide["path"])
+            result = send_photo(
+                ADMIN_CHAT_ID,
+                photo_path=slide["path"],
+            )
+
             message_id = result.get("message_id")
             photos = result.get("photo", [])
+
             if photos:
-                state["latest"]["slides"][idx]["file_id"] = photos[-1]["file_id"]
+                new_file_id = photos[-1]["file_id"]
+                state["latest"]["slides"][idx]["file_id"] = new_file_id
                 state["latest"]["slides"][idx]["hash"] = slide["hash"]
                 changed = True
                 print(f"Кэш: слайд {slide['number']} file_id сохранён.")
+            else:
+                print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
+
             if message_id:
                 try:
                     delete_message(ADMIN_CHAT_ID, message_id)
                 except Exception:
                     pass
+
         except Exception as e:
-            print(f"Кэш: ошибка слайда {slide['number']}: {e}")
+            print(f"Кэш: ошибка загрузки слайда {slide['number']}: {e}")
+
     return changed
 
+
+# ============================================================
+# SEND ONE SLIDE
+# ============================================================
 
 def send_slide(chat_id, slide_number, slide_path, file_id=None, caption=None, keyboard=None):
     if file_id:
         return send_photo(chat_id, file_id=file_id, caption=caption, keyboard=keyboard)
-    return send_photo(chat_id, photo_path=slide_path, caption=caption, keyboard=keyboard)
+    else:
+        return send_photo(chat_id, photo_path=slide_path, caption=caption, keyboard=keyboard)
 
+
+# ============================================================
+# FAST USER REQUEST FULFILLMENT (FROM CACHE)
+# ============================================================
 
 def fulfill_user_requests(state):
     changed = False
@@ -882,6 +748,7 @@ def fulfill_user_requests(state):
         slide_num = CLASS_TO_SLIDE[selected_class]
         cached = slides[slide_num - 1]
         file_id = cached.get("file_id")
+
         if not file_id:
             continue
 
@@ -908,6 +775,10 @@ def fulfill_user_requests(state):
 
     return changed
 
+
+# ============================================================
+# BROADCAST
+# ============================================================
 
 def broadcast(state, slides, schedule_changed):
     users = state["users"]
@@ -940,11 +811,11 @@ def broadcast(state, slides, schedule_changed):
                 continue
 
             cached_file_id = state["latest"]["slides"][index].get("file_id")
-            caption = (
-                f"Доступно новое расписание «{selected_class}»!"
-                if is_new_alert
-                else f"Расписание «{selected_class}»"
-            )
+
+            if is_new_alert:
+                caption = f"Доступно новое расписание «{selected_class}»!"
+            else:
+                caption = f"Расписание «{selected_class}»"
 
             send_slide(
                 chat_id,
@@ -957,14 +828,20 @@ def broadcast(state, slides, schedule_changed):
 
             user["sent"] = current_hash
             user["want_schedule"] = False
-            print(f"Расписание слайда {slide_number} отправлено {chat_id} ({selected_class}).")
+
+            print(
+                f"Расписание слайда {slide_number} "
+                f"отправлено пользователю {chat_id} "
+                f"(класс {selected_class})."
+            )
 
         except requests.HTTPError as e:
             print(f"Ошибка Telegram для {user_key}: {e}")
             response = getattr(e, "response", None)
             if response is not None and response.status_code in (403, 400):
-                print(f"Удаляем пользователя {user_key}: бот заблокировал.")
+                print(f"Удаляем пользователя {user_key}: бот заблокирован.")
                 users.pop(user_key, None)
+
         except Exception as e:
             print(f"Ошибка отправки пользователю {user_key}: {e}")
 
@@ -980,18 +857,23 @@ def main():
 
     state, state_sha = load_state()
 
+    # 1. Забираем входящие сообщения
     print("Получение новых сообщений Telegram...")
     state_changed = process_commands(state)
 
+    # 2. Быстро отвечаем из кэша
     if fulfill_user_requests(state):
         state_changed = True
 
+    # 3. Решаем, идти ли на Яндекс (проверка с 12:00 до 01:00 МСК)
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
+    # Часовой пояс Москвы (UTC+3)
     msk_tz = timezone(timedelta(hours=3))
     now_msk = datetime.now(msk_tz)
-    # 12:00 → 01:00 МСК
+
+    # Активные часы: с 12:00 дня до 01:00 ночи МСК (т.е. часы 12..23 и 0)
     is_active_hours = (now_msk.hour >= 12 or now_msk.hour == 0)
 
     needs_yandex = False
@@ -1008,20 +890,19 @@ def main():
                 state_changed = True
 
     should_fetch_yandex = is_active_hours and (
-        time_since_last_check >= YANDEX_CHECK_INTERVAL or needs_yandex
+        time_since_last_check >= YANDEX_CHECK_INTERVAL
+        or needs_yandex
     )
 
     if not is_active_hours:
         print(
-            f"Пропуск Яндекса: сейчас {now_msk.strftime('%H:%M')} МСК "
-            f"(окно 12:00–01:00 МСК)."
+            f"Пропуск скачивания с Яндекса: сейчас {now_msk.strftime('%H:%M')} МСК "
+            f"(проверка работает только с 12:00 до 01:00 МСК)."
         )
     elif should_fetch_yandex:
-        print(
-            f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с, "
-            f"время {now_msk.strftime('%H:%M')} МСК)..."
-        )
+        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с, время {now_msk.strftime('%H:%M')} МСК)...")
         schedule_changed = False
+
         try:
             pdf_path = download_pdf()
             slides = make_schedule(pdf_path)
@@ -1031,23 +912,26 @@ def main():
                 if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
                     schedule_changed = True
 
-            print("Расписание изменилось." if schedule_changed else "Расписание не изменилось.")
+            if schedule_changed:
+                print("Расписание изменилось.")
+            else:
+                print("Расписание не изменилось.")
 
             if warmup_cache(state, slides):
                 state_changed = True
 
             broadcast(state, slides, schedule_changed)
+
             state["last_yandex_check"] = now
             state_changed = True
+
         except Exception as e:
             print(f"Ошибка расписания: {e}")
             print("Старое расписание сохранено.")
     else:
-        print(
-            f"Пропуск Яндекса (прошло {int(time_since_last_check)}с "
-            f"из {YANDEX_CHECK_INTERVAL}с)"
-        )
+        print(f"Пропуск скачивания с Яндекса (прошло {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с)")
 
+    # 4. Сохраняем состояние
     if state_changed:
         save_state(state, state_sha)
     else:
