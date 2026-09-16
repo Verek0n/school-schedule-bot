@@ -493,192 +493,442 @@ def _find_element(page, candidates):
 
 
 def download_pdf():
+    """
+    Надёжная загрузка PDF из Яндекс.Документов.
+
+    Почему эта версия отличается от старой:
+    - не блокирует произвольные запросы через page.route("**/*");
+    - ловит PDF даже если Content-Type/URL не выглядят как обычный .pdf;
+    - использует несколько способов скачивания;
+    - при проблеме сохраняет HTML + screenshot для диагностики;
+    - показывает реальную причину ошибки, а не только "Не удалось скачать PDF".
+    """
     target = WORK / "source.pdf"
+    debug_html = WORK / "yandex_debug.html"
+    debug_png = WORK / "yandex_debug.png"
+
     if target.exists():
         target.unlink()
 
     print("Скачивание расписания в формате PDF через браузер...")
     t0 = time.time()
 
+    pdf_bodies = []
+    pdf_urls = []
+    download_failures = []
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+        browser = None
+        context = None
 
-        context = browser.new_context(
-            accept_downloads=True,
-            locale="ru-RU",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-        )
+        try:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
 
-        page = context.new_page()
+            context = browser.new_context(
+                accept_downloads=True,
+                locale="ru-RU",
+                timezone_id="Europe/Moscow",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1920, "height": 1080},
+                screen={"width": 1920, "height": 1080},
+                extra_http_headers={
+                    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
+                },
+            )
 
-        # Маскировка под реального пользователя (обход анти-бота Яндекса)
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            window.chrome = { runtime: {} };
-        """)
+            page = context.new_page()
 
-        pdf_bytes_container = []
+            # Не вмешиваемся в сетевые запросы Яндекса.
+            # Старая версия через page.route("**/*") могла ломать viewer.
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['ru-RU', 'ru', 'en-US', 'en']
+                });
+                window.chrome = window.chrome || {runtime: {}};
+            """)
 
-        # Перехват PDF напрямую из сети, если Яндекс выдает его фоном
-        def handle_response(response):
+            def handle_response(response):
+                try:
+                    headers = {
+                        str(k).lower(): str(v)
+                        for k, v in response.headers.items()
+                    }
+                    ctype = headers.get("content-type", "").lower()
+                    url = response.url.lower()
+
+                    # Смотрим не только на URL и Content-Type.
+                    # Иногда Yandex viewer отдаёт PDF с неожиданным MIME.
+                    looks_like_pdf = (
+                        "application/pdf" in ctype
+                        or ".pdf" in url
+                        or "/pdf" in url
+                        or "document" in ctype
+                    )
+
+                    if not looks_like_pdf:
+                        return
+
+                    if response.status != 200:
+                        return
+
+                    body = response.body()
+                    if body and body.startswith(b"%PDF") and len(body) > 1000:
+                        pdf_bodies.append(body)
+                        pdf_urls.append(response.url)
+                        print(
+                            f"Найден PDF в сети: "
+                            f"{len(body)} байт, URL={response.url[:180]}"
+                        )
+                except Exception as e:
+                    print(f"Предупреждение при чтении сетевого ответа: {e}")
+
+            page.on("response", handle_response)
+
+            def handle_request_failed(request):
+                try:
+                    print(
+                        f"Сетевой запрос не выполнен: "
+                        f"{request.method} {request.url[:180]} "
+                        f"({request.failure})"
+                    )
+                except Exception:
+                    pass
+
+            page.on("requestfailed", handle_request_failed)
+
+            def handle_console(msg):
+                try:
+                    if msg.type in ("error", "warning"):
+                        print(f"Browser console [{msg.type}]: {msg.text[:500]}")
+                except Exception:
+                    pass
+
+            page.on("console", handle_console)
+
+            print(f"Открываем: {SOURCE_URL}")
+
             try:
-                headers = {k.lower(): v for k, v in response.headers.items()}
-                ctype = headers.get("content-type", "")
-                if "application/pdf" in ctype or response.url.endswith(".pdf"):
-                    if response.status == 200:
-                        body = response.body()
-                        if body and body.startswith(b"%PDF") and len(body) > 1000:
-                            pdf_bytes_container.append(body)
+                response = page.goto(
+                    SOURCE_URL,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                if response:
+                    print(
+                        f"Стартовая страница: HTTP {response.status}, "
+                        f"Content-Type={response.headers.get('content-type', '')}"
+                    )
+            except Exception as e:
+                print(f"Предупреждение при переходе по URL: {e}")
+
+            # Даём viewer время загрузить JS и сам документ.
+            page.wait_for_timeout(7000)
+
+            print(f"Фактический URL: {page.url}")
+            print(f"Title: {page.title()[:200]}")
+
+            # Закрываем возможные диалоги/баннеры, но НЕ удаляем элементы
+            # по широким CSS-селекторам: они могли совпадать с элементами viewer.
+            try:
+                page.keyboard.press("Escape")
             except Exception:
                 pass
 
-        page.on("response", handle_response)
+            # ========================================================
+            # СПОСОБ №1: PDF уже пришёл по сети
+            # ========================================================
+            if pdf_bodies:
+                target.write_bytes(pdf_bodies[-1])
+                print(
+                    f"PDF успешно перехвачен из сети: "
+                    f"{target.stat().st_size} байт."
+                )
 
-        def route_filter(route):
-            url = route.request.url
-            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
-                return route.abort()
-            return route.continue_()
+            # ========================================================
+            # СПОСОБ №2: прямые ссылки/кнопки download
+            # ========================================================
+            if not target.exists():
+                candidates = [
+                    "a[download]",
+                    "a[href*='.pdf']",
+                    "a[href*='download']",
+                    "button:has-text('Скачать')",
+                    "[role='button']:has-text('Скачать')",
+                    "[role='menuitem']:has-text('Скачать')",
+                ]
 
-        page.route("**/*", route_filter)
+                for selector in candidates:
+                    try:
+                        loc = page.locator(selector)
+                        count = min(loc.count(), 10)
 
-        try:
-            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            print(f"Предупреждение при переходе по URL: {e}")
+                        for i in range(count):
+                            item = loc.nth(i)
+                            if not item.is_visible():
+                                continue
 
-        page.wait_for_timeout(3500)
+                            print(f"Найден элемент скачивания: {selector}")
 
-        # Удаление сервисных баннеров/оверлеев Яндекса
-        try:
-            page.evaluate("""
-                () => {
-                    const selectors = ['.popup', '.modal', '[class*="banner"]', '[class*="cookie"]', '[class*="dialog"]'];
-                    selectors.forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
-                }
-            """)
-            page.keyboard.press("Escape")
-        except Exception:
-            pass
+                            try:
+                                with page.expect_download(timeout=15000) as di:
+                                    item.click(timeout=5000, force=True)
 
-        download_ok = False
+                                download = di.value
+                                failure = download.failure()
 
-        # Проверка, не перехвачен ли файл уже из сети
-        if pdf_bytes_container:
-            target.write_bytes(pdf_bytes_container[-1])
-            download_ok = True
-            print("PDF успешно перехвачен из сетевого потока.")
+                                if failure:
+                                    download_failures.append(str(failure))
+                                    continue
 
-        if not download_ok:
-            for attempt in range(10):
-                try:
-                    page.keyboard.press("Escape")
+                                download.save_as(target)
 
-                    file_btn = _find_element(page, [
-                        ("button", re.compile(r"^Файл$", re.I)),
-                        ("menuitem", re.compile(r"^Файл$", re.I)),
-                        re.compile(r"^Файл$", re.I),
-                        "Файл",
-                    ])
+                                if target.exists() and target.stat().st_size > 1000:
+                                    print(
+                                        f"PDF скачан через download: "
+                                        f"{target.stat().st_size} байт."
+                                    )
+                                    break
+                            except Exception as e:
+                                download_failures.append(
+                                    f"{selector}: {type(e).__name__}: {e}"
+                                )
 
-                    direct_btn = _find_element(page, [
-                        ("button", re.compile(r"^Скачать$", re.I)),
-                        ("menuitem", re.compile(r"Скачать", re.I)),
-                        re.compile(r"^Скачать$", re.I),
-                        "Скачать",
-                    ])
+                        if target.exists():
+                            break
+                    except Exception:
+                        continue
 
-                    if file_btn:
-                        file_btn.click(timeout=3000, force=True)
-                        page.wait_for_timeout(600)
+            # ========================================================
+            # СПОСОБ №3: меню "Файл" -> "Скачать" -> PDF
+            # ========================================================
+            if not target.exists():
+                for attempt in range(5):
+                    print(f"Попытка через меню Яндекса: {attempt + 1}/5")
 
-                        download_btn = _find_element(page, [
-                            ("menuitem", re.compile(r"Скачать", re.I)),
-                            ("button", re.compile(r"Скачать", re.I)),
-                            re.compile(r"Скачать", re.I),
-                            "Скачать",
-                        ])
+                    try:
+                        page.keyboard.press("Escape")
+
+                        file_candidates = [
+                            page.get_by_role(
+                                "button",
+                                name=re.compile(r"^Файл$", re.I),
+                            ),
+                            page.get_by_role(
+                                "menuitem",
+                                name=re.compile(r"^Файл$", re.I),
+                            ),
+                            page.get_by_text(
+                                "Файл",
+                                exact=True,
+                            ),
+                        ]
+
+                        file_btn = None
+                        for loc in file_candidates:
+                            try:
+                                if loc.count() > 0 and loc.first.is_visible():
+                                    file_btn = loc.first
+                                    break
+                            except Exception:
+                                pass
+
+                        if not file_btn:
+                            page.wait_for_timeout(1000)
+                            continue
+
+                        file_btn.click(timeout=5000, force=True)
+                        page.wait_for_timeout(700)
+
+                        download_candidates = [
+                            page.get_by_role(
+                                "menuitem",
+                                name=re.compile(r"Скачать", re.I),
+                            ),
+                            page.get_by_role(
+                                "button",
+                                name=re.compile(r"Скачать", re.I),
+                            ),
+                            page.get_by_text(
+                                re.compile(r"^Скачать$", re.I)
+                            ),
+                        ]
+
+                        download_btn = None
+                        for loc in download_candidates:
+                            try:
+                                if loc.count() > 0 and loc.first.is_visible():
+                                    download_btn = loc.first
+                                    break
+                            except Exception:
+                                pass
+
                         if not download_btn:
                             continue
 
-                        try:
-                            download_btn.hover(timeout=2000)
-                            download_btn.click(timeout=2000, force=True)
-                        except Exception:
-                            pass
+                        download_btn.click(timeout=5000, force=True)
+                        page.wait_for_timeout(800)
 
-                        page.wait_for_timeout(600)
+                        pdf_candidates = [
+                            page.get_by_role(
+                                "menuitem",
+                                name=re.compile(r"PDF|Документ PDF", re.I),
+                            ),
+                            page.get_by_role(
+                                "button",
+                                name=re.compile(r"PDF|Документ PDF", re.I),
+                            ),
+                            page.get_by_text(
+                                re.compile(r"Документ PDF|PDF", re.I)
+                            ),
+                        ]
 
-                        pdf_btn = _find_element(page, [
-                            ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
-                            ("button", re.compile(r"PDF|\.pdf", re.I)),
-                            re.compile(r"Документ PDF|\.pdf|PDF", re.I),
-                            ".pdf",
-                        ])
+                        pdf_btn = None
+                        for loc in pdf_candidates:
+                            try:
+                                if loc.count() > 0 and loc.first.is_visible():
+                                    pdf_btn = loc.first
+                                    break
+                            except Exception:
+                                pass
+
                         if not pdf_btn:
                             continue
 
-                        print("Ожидание скачивания PDF через меню 'Файл'...")
-                        with page.expect_download(timeout=25000) as download_info:
-                            pdf_btn.click(timeout=4000, force=True)
+                        with page.expect_download(timeout=30000) as di:
+                            pdf_btn.click(timeout=5000, force=True)
 
-                        download = download_info.value
-                        if not download.failure():
-                            download.save_as(target)
-                            print(f"PDF скачан: {target}")
-                            download_ok = True
+                        download = di.value
+                        failure = download.failure()
+
+                        if failure:
+                            download_failures.append(str(failure))
+                            continue
+
+                        download.save_as(target)
+
+                        if target.exists() and target.stat().st_size > 1000:
+                            print(
+                                f"PDF скачан через Файл -> Скачать: "
+                                f"{target.stat().st_size} байт."
+                            )
                             break
 
-                    elif direct_btn:
-                        print("Ожидание скачивания PDF через кнопку 'Скачать'...")
-                        with page.expect_download(timeout=25000) as download_info:
-                            direct_btn.click(timeout=4000, force=True)
+                    except Exception as e:
+                        download_failures.append(
+                            f"menu attempt {attempt + 1}: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        page.wait_for_timeout(1000)
 
-                        download = download_info.value
-                        if not download.failure():
-                            download.save_as(target)
-                            print(f"PDF скачан напрямую: {target}")
-                            download_ok = True
-                            break
+            # ========================================================
+            # Последняя проверка сетевого перехвата
+            # ========================================================
+            if not target.exists() and pdf_bodies:
+                target.write_bytes(pdf_bodies[-1])
+                print("PDF получен последним сетевым перехватом.")
 
-                    if pdf_bytes_container:
-                        target.write_bytes(pdf_bytes_container[-1])
-                        download_ok = True
-                        print("PDF перехвачен из сетевого потока.")
-                        break
-
-                    page.wait_for_timeout(1000)
-
+            # ========================================================
+            # ДИАГНОСТИКА, если ничего не получилось
+            # ========================================================
+            if not target.exists():
+                try:
+                    debug_html.write_text(
+                        page.content(),
+                        encoding="utf-8",
+                    )
+                    print(f"Диагностический HTML сохранён: {debug_html}")
                 except Exception as e:
-                    print(f"Попытка {attempt+1}: {e}")
-                    page.wait_for_timeout(1000)
+                    print(f"Не удалось сохранить HTML: {e}")
 
-        browser.close()
+                try:
+                    page.screenshot(
+                        path=str(debug_png),
+                        full_page=True,
+                    )
+                    print(f"Диагностический screenshot сохранён: {debug_png}")
+                except Exception as e:
+                    print(f"Не удалось сохранить screenshot: {e}")
 
-        if not download_ok and pdf_bytes_container:
-            target.write_bytes(pdf_bytes_container[-1])
-            download_ok = True
+                # Показываем текст страницы — это очень важно:
+                # здесь обычно становится видно "Доступ запрещён",
+                # CAPTCHA, ошибка viewer и т.п.
+                try:
+                    body_text = page.locator("body").inner_text(timeout=5000)
+                    body_text = re.sub(r"\s+", " ", body_text).strip()
+                    print(
+                        "Текст страницы (первые 1500 символов): "
+                        f"{body_text[:1500]}"
+                    )
+                except Exception as e:
+                    print(f"Не удалось прочитать текст страницы: {e}")
 
-        if not download_ok or not target.exists():
-            raise RuntimeError("Не удалось скачать PDF.")
+                if download_failures:
+                    print("Последние ошибки скачивания:")
+                    for item in download_failures[-10:]:
+                        print(f"  - {item}")
+
+                raise RuntimeError(
+                    "Не удалось скачать PDF из Яндекс.Документов. "
+                    "Смотри yandex_debug.html и yandex_debug.png в папке work."
+                )
+
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+
+            if browser is not None:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    if not target.exists():
+        raise RuntimeError("PDF-файл не создан.")
 
     if target.stat().st_size < 1000:
+        try:
+            target.unlink()
+        except Exception:
+            pass
         raise RuntimeError("Скачанный PDF слишком мал.")
 
-    print(f"PDF успешно проверен ({target.stat().st_size} байт, за {time.time() - t0:.1f}с).")
+    # Проверяем именно сигнатуру PDF.
+    with target.open("rb") as f:
+        signature = f.read(5)
+
+    if signature != b"%PDF-":
+        try:
+            target.unlink()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Полученный файл не является PDF (сигнатура={signature!r})."
+        )
+
+    print(
+        f"PDF успешно проверен "
+        f"({target.stat().st_size} байт, за {time.time() - t0:.1f}с)."
+    )
+
     return target
 
 
