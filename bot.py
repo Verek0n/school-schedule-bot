@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pymupdf
@@ -27,8 +28,11 @@ STATE_TOKEN = os.environ["STATE_TOKEN"]
 # В чат админа отправляем фото для получения file_id, затем удаляем
 ADMIN_CHAT_ID = 1334717692
 
-# Интервал проверки Яндекса: 900 секунд = 15 минут
-YANDEX_CHECK_INTERVAL = 900
+# Интервал проверки Яндекса: 1800 секунд = 30 минут
+YANDEX_CHECK_INTERVAL = 1800
+
+# Часовой пояс Москвы (UTC+3)
+MSK_TZ = timezone(timedelta(hours=3))
 
 STATE_REPO = "Verek0n/school-schedule-state"
 WORK = Path("work")
@@ -399,7 +403,6 @@ def process_commands(state):
                     else:
                         user["want_schedule"] = True
                         changed = True
-                        # Текстовое сообщение убрано, бот сразу отправит фото из кэша или после загрузки
                     continue
 
                 # /stats
@@ -437,7 +440,6 @@ def process_commands(state):
                     changed = True
 
                     print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
-                    # Текстовое подтверждение убрано, бот сразу пришлет фото расписания
                     continue
 
                 # НЕИЗВЕСТНАЯ КОМАНДА
@@ -862,8 +864,8 @@ def main():
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Идём на Яндекс если прошло 15 минут
-    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск)
+    # Идём на Яндекс если прошло время интервала
+    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск бота)
     needs_yandex = False
     for user in state["users"].values():
         if user.get("want_schedule"):
@@ -877,13 +879,18 @@ def main():
                 user["want_schedule"] = False
                 state_changed = True
 
+    # Вычисляем текущее московское время (UTC+3)
+    msk_now = datetime.now(MSK_TZ)
+    # Проверяем диапазон: от 12:00 до 00:00 (то есть час >= 12 и < 24)
+    is_active_hours = (12 <= msk_now.hour < 24)
+
     should_fetch_yandex = (
-        time_since_last_check >= YANDEX_CHECK_INTERVAL
+        (time_since_last_check >= YANDEX_CHECK_INTERVAL and is_active_hours)
         or needs_yandex
     )
 
     if should_fetch_yandex:
-        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с)...")
+        print(f"Идем проверять Яндекс (МСК: {msk_now.strftime('%H:%M:%S')}, прошло {int(time_since_last_check)}с)...")
         schedule_changed = False
 
         try:
@@ -915,7 +922,8 @@ def main():
             print(f"Ошибка расписания: {e}")
             print("Старое расписание сохранено.")
     else:
-        print(f"Пропуск скачивания с Яндекса (прошло {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с)")
+        reason = f"не входит в диапазон 12:00-00:00 МСК ({msk_now.strftime('%H:%M')})" if not is_active_hours else f"прошло {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с"
+        print(f"Пропуск скачивания с Яндекса ({reason})")
 
     # 4. Сохраняем состояние
     if state_changed:
