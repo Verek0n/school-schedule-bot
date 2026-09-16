@@ -136,10 +136,12 @@ def send_message(chat_id, text, keyboard=None):
     return telegram("sendMessage", data)
 
 
-def send_photo(chat_id, photo_path=None, file_id=None, caption=None):
+def send_photo(chat_id, photo_path=None, file_id=None, caption=None, keyboard=None):
     data = {"chat_id": chat_id}
     if caption:
         data["caption"] = caption
+    if keyboard is not None:
+        data["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
     if file_id:
         data["photo"] = file_id
         return telegram("sendPhoto", data)
@@ -261,7 +263,12 @@ def process_commands(state):
     changed = False
 
     for _ in range(10):
-        updates = get_updates(state["offset"])
+        try:
+            updates = get_updates(state["offset"])
+        except Exception as e:
+            print(f"Ошибка получения обновлений Telegram: {e}")
+            break
+
         if not updates:
             break
 
@@ -280,144 +287,186 @@ def process_commands(state):
             if not text:
                 continue
 
-            print(f"Получено сообщение от {chat_id}: {text}")
             user_key = str(chat_id)
+            print(f"Получено сообщение от {chat_id}: {text}")
 
-            # /start
-            if text == "/start":
-                if user_key not in state["users"]:
-                    state["users"][user_key] = {
-                        "class": None,
-                        "sent": None,
-                        "want_schedule": False,
-                    }
-                    changed = True
+            try:
+                # АДМИН-РАССЫЛКА: /broadcast <текст> или /объявление <текст>
+                is_admin = (user_key == str(ADMIN_CHAT_ID))
+                if is_admin and (text.startswith("/broadcast ") or text.startswith("/объявление ")):
+                    parts = text.split(maxsplit=1)
+                    if len(parts) > 1:
+                        broadcast_text = parts[1]
+                        subscribers = list(state.get("users", {}).keys())
+                        send_message(chat_id, f"Начинаю рассылку для {len(subscribers)} пользователей...")
 
-                welcome_msg = (
-                    "Добро пожаловать в бота для получения расписания школы №9!\n\n"
-                    "Бот обновляется раз в 5 минут, поэтому возможны небольшие задержки. "
-                    "Если бот не отвечает более 10 минут — напишите @Verek0n\n\n"
-                )
+                        success_count = 0
+                        fail_count = 0
 
-                current_class = state["users"][user_key].get("class")
-                if current_class:
-                    send_message(
-                        chat_id,
-                        welcome_msg + f"Текущий класс: {current_class}",
-                        class_keyboard(),
-                    )
-                else:
-                    send_message(
-                        chat_id,
-                        welcome_msg + "Выберите свой класс на клавиатуре ниже:",
-                        class_keyboard(),
-                    )
-                continue
+                        for sub_id in subscribers:
+                            try:
+                                send_message(int(sub_id), broadcast_text)
+                                success_count += 1
+                                time.sleep(0.05)  # небольшая задержка от лимитов спама
+                            except requests.HTTPError as e:
+                                if e.response is not None and e.response.status_code in (403, 400):
+                                    print(f"Удаляем пользователя {sub_id} (заблокировал бота во время рассылки).")
+                                    if sub_id in state["users"]:
+                                        del state["users"][sub_id]
+                                        changed = True
+                                    fail_count += 1
+                                else:
+                                    print(f"Не удалось отправить пользователю {sub_id}: {e}")
+                                    fail_count += 1
+                            except Exception as e:
+                                print(f"Ошибка отправки пользователю {sub_id}: {e}")
+                                fail_count += 1
 
-            # /stop
-            if text == "/stop":
-                if user_key in state["users"]:
-                    del state["users"][user_key]
-                    changed = True
-
-                send_message(
-                    chat_id,
-                    "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
-                    REMOVE_KEYBOARD,
-                )
-                continue
-
-            # /class
-            if text == "/class":
-                send_message(chat_id, "Выберите класс:", class_keyboard())
-                continue
-
-            # /schedule
-            if text == "/schedule":
-                if user_key not in state["users"]:
-                    state["users"][user_key] = {
-                        "class": None,
-                        "sent": None,
-                        "want_schedule": False,
-                    }
-                    changed = True
-
-                user = state["users"][user_key]
-                if not user.get("class"):
-                    send_message(
-                        chat_id,
-                        "Сначала выберите свой класс на клавиатуре:",
-                        class_keyboard(),
-                    )
-                else:
-                    user["want_schedule"] = True
-                    changed = True
-                    send_message(
-                        chat_id,
-                        "Запрос принят! Расписание отправляется...",
-                    )
-                continue
-
-            # /stats
-            if text == "/stats":
-                if user_key == "1334717692":
-                    subscribers = state.get("users", {})
-                    total = len(subscribers)
-                    with_class = sum(1 for u in subscribers.values() if u.get("class"))
-                    without_class = total - with_class
-
-                    lines = [
-                        "Статистика бота",
-                        "",
-                        f"Всего пользователей: {total}",
-                        f"С выбранным классом: {with_class}",
-                        f"Без класса: {without_class}",
-                    ]
-                    send_message(chat_id, "\n".join(lines))
+                        send_message(
+                            chat_id, 
+                            f"Рассылка завершена.\nУспешно: {success_count}\nОшибок/Удалено: {fail_count}"
+                        )
+                    else:
+                        send_message(chat_id, "Использование: /broadcast <текст уведомления>")
                     continue
 
-            # CLASS BUTTON
-            if text in CLASS_TO_SLIDE:
-                if user_key not in state["users"]:
-                    state["users"][user_key] = {
-                        "class": None,
-                        "sent": None,
-                        "want_schedule": False,
-                    }
+                # /start
+                if text == "/start":
+                    if user_key not in state["users"]:
+                        state["users"][user_key] = {
+                            "class": None,
+                            "sent": None,
+                            "want_schedule": False,
+                        }
+                        changed = True
 
-                user = state["users"][user_key]
-                old_class = user.get("class")
-                user["class"] = text
-                user["sent"] = None
-                user["want_schedule"] = True
-                changed = True
+                    welcome_msg = (
+                        "Добро пожаловать в бота для получения расписания школы №9!\n\n"
+                        "Бот обновляется раз в 5 минут, поэтому возможны небольшие задержки. "
+                        "Если бот не отвечает более 10 минут — напишите @Verek0n\n\n"
+                    )
 
-                print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
+                    current_class = state["users"][user_key].get("class")
+                    if current_class:
+                        send_message(
+                            chat_id,
+                            welcome_msg + f"Текущий класс: {current_class}",
+                            class_keyboard(),
+                        )
+                    else:
+                        send_message(
+                            chat_id,
+                            welcome_msg + "Выберите свой класс на клавиатуре ниже:",
+                            class_keyboard(),
+                        )
+                    continue
+
+                # /stop
+                if text == "/stop":
+                    if user_key in state["users"]:
+                        del state["users"][user_key]
+                        changed = True
+
+                    send_message(
+                        chat_id,
+                        "Вы отписались от рассылки расписания.\nЧтобы вернуться, отправьте /start.",
+                        REMOVE_KEYBOARD,
+                    )
+                    continue
+
+                # /class
+                if text == "/class":
+                    send_message(chat_id, "Выберите класс:", class_keyboard())
+                    continue
+
+                # /schedule
+                if text == "/schedule":
+                    if user_key not in state["users"]:
+                        state["users"][user_key] = {
+                            "class": None,
+                            "sent": None,
+                            "want_schedule": False,
+                        }
+                        changed = True
+
+                    user = state["users"][user_key]
+                    if not user.get("class"):
+                        send_message(
+                            chat_id,
+                            "Сначала выберите свой класс на клавиатуре:",
+                            class_keyboard(),
+                        )
+                    else:
+                        user["want_schedule"] = True
+                        changed = True
+                    continue
+
+                # /stats
+                if text == "/stats":
+                    if user_key == str(ADMIN_CHAT_ID):
+                        subscribers = state.get("users", {})
+                        total = len(subscribers)
+                        with_class = sum(1 for u in subscribers.values() if u.get("class"))
+                        without_class = total - with_class
+
+                        lines = [
+                            "Статистика бота",
+                            "",
+                            f"Всего пользователей: {total}",
+                            f"С выбранным классом: {with_class}",
+                            f"Без класса: {without_class}",
+                        ]
+                        send_message(chat_id, "\n".join(lines))
+                        continue
+
+                # КНОПКА ВЫБОРА КЛАССА
+                if text in CLASS_TO_SLIDE:
+                    if user_key not in state["users"]:
+                        state["users"][user_key] = {
+                            "class": None,
+                            "sent": None,
+                            "want_schedule": False,
+                        }
+
+                    user = state["users"][user_key]
+                    old_class = user.get("class")
+                    user["class"] = text
+                    user["sent"] = None
+                    user["want_schedule"] = True
+                    changed = True
+
+                    print(f"Пользователь {chat_id} выбрал класс {text} (было: {old_class})")
+                    continue
+
+                # НЕИЗВЕСТНАЯ КОМАНДА
                 send_message(
                     chat_id,
-                    f"Класс выбран: «{text}»\nРасписание отправляется...",
+                    (
+                        "Я умею только выполнять команды:\n"
+                        "/schedule - Получить расписание\n"
+                        "/class - Изменить свой класс\n"
+                        "/start - Подписаться на расписание\n"
+                        "/stop - Отключить рассылку"
+                    ),
                     class_keyboard(),
                 )
-                continue
 
-            # UNKNOWN
-            send_message(
-                chat_id,
-                (
-                    "Это конечно прикольно, но я умею только:\n"
-                    "/schedule - Получить расписание\n"
-                    "/class - Изменить свой класс\n"
-                    "/start - Подписаться на расписание\n"
-                    "/stop - Отключить рассылку"
-                ),
-                class_keyboard(),
-            )
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code in (403, 400):
+                    print(f"Пользователь {chat_id} заблокировал бота (403/400). Удаляем из состояния.")
+                    if user_key in state["users"]:
+                        del state["users"][user_key]
+                        changed = True
+                else:
+                    print(f"HTTP ошибка при обработке сообщения от {chat_id}: {e}")
+            except Exception as e:
+                print(f"Ошибка при обработке сообщения от {chat_id}: {e}")
 
     return changed
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD
+# YANDEX PDF DOWNLOAD (SMART FETCH)
 # ============================================================
 
 def _find_element(page, candidates):
@@ -471,82 +520,121 @@ def download_pdf():
 
         page = context.new_page()
 
+        # Блокируем метрику, чтобы страница грузилась быстрее
         def route_filter(route):
             url = route.request.url
-            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
+            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru"]):
                 return route.abort()
             return route.continue_()
 
         page.route("**/*", route_filter)
-        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
+        
+        try:
+            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
+            # Ждем немного, чтобы React-компоненты Яндекса успели отрисоваться
+            page.wait_for_timeout(3000) 
+        except Exception as e:
+            browser.close()
+            raise RuntimeError(f"Не удалось загрузить страницу Яндекса: {e}")
 
         download_ok = False
 
-        for _ in range(8):
-            try:
-                file_btn = _find_element(page, [
-                    ("button", re.compile(r"^Файл$", re.I)),
-                    ("menuitem", re.compile(r"^Файл$", re.I)),
-                    re.compile(r"^Файл$", re.I),
-                    "Файл",
-                ])
-                if not file_btn:
-                    page.wait_for_timeout(1000)
-                    continue
-
-                file_btn.click(timeout=3000)
-
-                download_btn = _find_element(page, [
-                    ("menuitem", re.compile(r"Скачать", re.I)),
-                    ("button", re.compile(r"Скачать", re.I)),
-                    re.compile(r"Скачать", re.I),
-                    "Скачать",
-                ])
-                if not download_btn:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                    continue
-
-                try:
-                    download_btn.hover(timeout=2000)
-                    download_btn.click(timeout=2000)
-                except Exception:
-                    pass
-
-                pdf_btn = _find_element(page, [
-                    ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
-                    ("button", re.compile(r"PDF|\.pdf", re.I)),
-                    re.compile(r"Документ PDF|\.pdf|PDF", re.I),
-                    ".pdf",
-                ])
-                if not pdf_btn:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                    continue
-
-                print("Ожидание скачивания PDF...")
-                with page.expect_download(timeout=25000) as download_info:
-                    pdf_btn.click(timeout=4000, force=True)
-
+        # ШАГ 1: Пытаемся найти прямую кнопку "Скачать" (часто бывает в интерфейсе просмотрщика)
+        try:
+            print("Поиск прямой кнопки 'Скачать'...")
+            direct_download_btn = _find_element(page, [
+                ("button", re.compile(r"Скачать", re.I)),
+                ("link", re.compile(r"Скачать", re.I)),
+                re.compile(r"^Скачать$", re.I),
+                "Скачать",
+            ])
+            
+            if direct_download_btn:
+                print("Прямая кнопка найдена, пробуем кликнуть...")
+                with page.expect_download(timeout=15000) as download_info:
+                    direct_download_btn.click(timeout=5000, force=True)
+                
                 download = download_info.value
-                if download.failure():
-                    raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
+                if not download.failure():
+                    download.save_as(target)
+                    print(f"PDF скачан напрямую: {target}")
+                    download_ok = True
+        except Exception as e:
+            print(f"Прямое скачивание не сработало, пробуем меню: {e}")
 
-                download.save_as(target)
-                print(f"PDF скачан: {target}")
-                download_ok = True
-                break
+        # ШАГ 2: Если прямой кнопки нет, используем старый алгоритм через меню "Файл"
+        if not download_ok:
+            print("Поиск через меню 'Файл' -> 'Скачать' -> 'PDF'...")
+            for _ in range(5):
+                try:
+                    file_btn = _find_element(page, [
+                        ("button", re.compile(r"^Файл$", re.I)),
+                        ("menuitem", re.compile(r"^Файл$", re.I)),
+                        re.compile(r"^Файл$", re.I),
+                        "Файл",
+                    ])
+                    if not file_btn:
+                        page.wait_for_timeout(1000)
+                        continue
 
-            except Exception:
-                page.wait_for_timeout(1000)
+                    file_btn.click(timeout=3000, force=True)
+                    page.wait_for_timeout(500)
+
+                    download_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"Скачать", re.I)),
+                        ("button", re.compile(r"Скачать", re.I)),
+                        re.compile(r"Скачать", re.I),
+                        "Скачать",
+                    ])
+                    if not download_btn:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(500)
+                        continue
+
+                    try:
+                        download_btn.hover(timeout=2000)
+                        download_btn.click(timeout=2000, force=True)
+                    except Exception:
+                        pass
+                        
+                    page.wait_for_timeout(500)
+
+                    pdf_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
+                        ("button", re.compile(r"PDF|\.pdf", re.I)),
+                        re.compile(r"Документ PDF|\.pdf|PDF", re.I),
+                        ".pdf",
+                    ])
+                    if not pdf_btn:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(500)
+                        continue
+
+                    print("Ожидание скачивания PDF...")
+                    with page.expect_download(timeout=25000) as download_info:
+                        pdf_btn.click(timeout=4000, force=True)
+
+                    download = download_info.value
+                    if download.failure():
+                        raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
+
+                    download.save_as(target)
+                    print(f"PDF скачан через меню: {target}")
+                    download_ok = True
+                    break
+
+                except Exception as e:
+                    print(f"Попытка через меню прервана: {e}")
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(1000)
 
         browser.close()
 
         if not download_ok or not target.exists():
-            raise RuntimeError("Не удалось скачать PDF.")
+            raise RuntimeError("Не удалось скачать PDF ни одним из способов.")
 
     if target.stat().st_size < 1000:
-        raise RuntimeError("Скачанный PDF слишком мал.")
+        raise RuntimeError("Скачанный PDF слишком мал (возможно, это HTML-заглушка).")
 
     print("PDF успешно проверен.")
     return target
@@ -601,29 +689,21 @@ def make_schedule(pdf_path):
 # ============================================================
 
 def warmup_cache(state, slides):
-    """
-    Для каждого слайда, у которого hash изменился (или file_id пуст),
-    отправляет PNG в чат админа, получает file_id, удаляет сообщение.
-    Админ ничего не увидит.
-    """
     changed = False
 
     for slide in slides:
         idx = slide["number"] - 1
         old = state["latest"]["slides"][idx]
 
-        # Если hash тот же и file_id уже есть — пропускаем
         if old.get("hash") == slide["hash"] and old.get("file_id"):
             continue
 
-        # Отправляем в чат админа
         try:
             result = send_photo(
                 ADMIN_CHAT_ID,
                 photo_path=slide["path"],
             )
 
-            # Получаем message_id и file_id
             message_id = result.get("message_id")
             photos = result.get("photo", [])
 
@@ -636,7 +716,6 @@ def warmup_cache(state, slides):
             else:
                 print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
 
-            # Удаляем сообщение, чтобы админ его не видел
             if message_id:
                 delete_message(ADMIN_CHAT_ID, message_id)
 
@@ -650,11 +729,11 @@ def warmup_cache(state, slides):
 # SEND ONE SLIDE
 # ============================================================
 
-def send_slide(chat_id, slide_number, slide_path, file_id=None, caption=None):
+def send_slide(chat_id, slide_number, slide_path, file_id=None, caption=None, keyboard=None):
     if file_id:
-        return send_photo(chat_id, file_id=file_id, caption=caption)
+        return send_photo(chat_id, file_id=file_id, caption=caption, keyboard=keyboard)
     else:
-        return send_photo(chat_id, photo_path=slide_path, caption=caption)
+        return send_photo(chat_id, photo_path=slide_path, caption=caption, keyboard=keyboard)
 
 
 # ============================================================
@@ -690,13 +769,14 @@ def fulfill_user_requests(state):
                 None,
                 file_id=file_id,
                 caption=f"Расписание «{selected_class}»",
+                keyboard=class_keyboard()
             )
             user["sent"] = cached.get("hash")
             user["want_schedule"] = False
             changed = True
             print(f"Мгновенно отправлено из кэша для {user_key} ({selected_class})")
         except requests.HTTPError as e:
-            if getattr(e.response, "status_code", None) == 403:
+            if getattr(e.response, "status_code", None) in (403, 400):
                 print(f"Удаляем пользователя {user_key}: бот заблокирован.")
                 users.pop(user_key, None)
                 changed = True
@@ -754,6 +834,7 @@ def broadcast(state, slides, schedule_changed):
                     current_slide["path"],
                     file_id=cached_file_id,
                     caption=caption,
+                    keyboard=class_keyboard(),
                 )
             else:
                 send_slide(
@@ -762,6 +843,7 @@ def broadcast(state, slides, schedule_changed):
                     current_slide["path"],
                     file_id=None,
                     caption=caption,
+                    keyboard=class_keyboard(),
                 )
 
             user["sent"] = current_hash
@@ -776,7 +858,7 @@ def broadcast(state, slides, schedule_changed):
         except requests.HTTPError as e:
             print(f"Ошибка Telegram для {user_key}: {e}")
             response = getattr(e, "response", None)
-            if response is not None and response.status_code == 403:
+            if response is not None and response.status_code in (403, 400):
                 print(f"Удаляем пользователя {user_key}: бот заблокирован.")
                 users.pop(user_key, None)
 
