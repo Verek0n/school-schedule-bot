@@ -453,7 +453,7 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD (EXACT UI FLOW)
+# YANDEX PDF DOWNLOAD (FRAME-AWARE SEARCH)
 # ============================================================
 
 def download_pdf():
@@ -488,7 +488,6 @@ def download_pdf():
 
         page = context.new_page()
 
-        # Отключаем ненужные рекламные/аналитические скрипты для скорости
         def route_filter(route):
             url = route.request.url
             if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru"]):
@@ -498,36 +497,77 @@ def download_pdf():
         page.route("**/*", route_filter)
 
         try:
-            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=30000)
+            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=35000)
         except Exception as e:
             browser.close()
             raise RuntimeError(f"Не удалось открыть страницу Яндекса: {e}")
 
-        # 1. Клик по меню "Файл"
-        file_btn = page.get_by_text("Файл", exact=True).first
-        file_btn.wait_for(state="visible", timeout=15000)
-        file_btn.click()
+        def find_element_in_frames(pattern, exact=False, timeout_sec=20):
+            start = time.time()
+            while time.time() - start < timeout_sec:
+                for root in [page] + list(page.frames):
+                    try:
+                        loc = root.get_by_text(pattern, exact=exact)
+                        if loc.count() > 0 and loc.first.is_visible():
+                            return loc.first
+                    except Exception:
+                        pass
+                page.wait_for_timeout(400)
+            return None
+
+        # 1. Поиск меню "Файл" по всем фреймам
+        print("Поиск меню 'Файл' во фреймах...")
+        file_btn = find_element_in_frames(re.compile(r"^Файл$", re.I), timeout_sec=20)
+        if not file_btn:
+            file_btn = find_element_in_frames("Файл", timeout_sec=5)
+
+        if not file_btn:
+            browser.close()
+            raise RuntimeError("Кнопка 'Файл' не найдена во фреймах редактора.")
+
+        file_btn.click(force=True)
         page.wait_for_timeout(300)
 
-        # 2. Наведение на меню "Скачать"
-        download_menu = page.get_by_text("Скачать", exact=False).first
-        download_menu.wait_for(state="visible", timeout=5000)
-        download_menu.hover()
+        # 2. Поиск пункта "Скачать"
+        print("Поиск пункта 'Скачать'...")
+        download_menu = find_element_in_frames(re.compile(r"^Скачать$", re.I), timeout_sec=5)
+        if not download_menu:
+            download_menu = find_element_in_frames("Скачать", timeout_sec=5)
+
+        if not download_menu:
+            browser.close()
+            raise RuntimeError("Пункт 'Скачать' не найден в меню.")
+
+        try:
+            download_menu.hover(timeout=2000)
+        except Exception:
+            pass
+        try:
+            download_menu.click(force=True, timeout=2000)
+        except Exception:
+            pass
         page.wait_for_timeout(300)
 
-        # 3. Клик по "Документ PDF (.pdf)" и ожидание скачивания
-        pdf_item = page.get_by_text("Документ PDF", exact=False).first
-        pdf_item.wait_for(state="visible", timeout=5000)
+        # 3. Поиск пункта "Документ PDF" и скачивание
+        print("Поиск формата 'PDF'...")
+        pdf_item = find_element_in_frames(re.compile(r"Документ PDF|\.pdf", re.I), timeout_sec=5)
+        if not pdf_item:
+            pdf_item = find_element_in_frames("PDF", timeout_sec=5)
 
-        with page.expect_download(timeout=20000) as download_info:
-            pdf_item.click()
+        if not pdf_item:
+            browser.close()
+            raise RuntimeError("Пункт 'Документ PDF' не найден.")
+
+        print("Клик по 'PDF' и скачивание...")
+        with page.expect_download(timeout=25000) as download_info:
+            pdf_item.click(force=True)
 
         download = download_info.value
         download.save_as(target)
         browser.close()
 
     if not target.exists() or target.stat().st_size < 1000:
-        raise RuntimeError("Скачанный PDF не существует или поврежден.")
+        raise RuntimeError("Скачанный PDF не существует или пуст.")
 
     print(f"PDF скачан за {time.time() - t0:.1f}с ({target.stat().st_size} байт).")
     return target
@@ -549,7 +589,7 @@ def make_schedule(pdf_path):
         if page_count < 5:
             raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {page_count}.")
 
-        # 200 DPI обеспечивает четкий и не размытый текст таблиц
+        # 200 DPI обеспечивает высокой четкости текст без размытий
         matrix = pymupdf.Matrix(200 / 72, 200 / 72)
 
         for slide_number in range(1, 6):
@@ -561,7 +601,6 @@ def make_schedule(pdf_path):
             )
 
             jpg_path = WORK / f"slide_{slide_number}.jpg"
-            # Сохраняем в JPG с качеством 95%
             pix.save(str(jpg_path), jpg_quality=95)
 
             image_hash = hashlib.sha256(jpg_path.read_bytes()).hexdigest()
