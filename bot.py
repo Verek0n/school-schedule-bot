@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import pymupdf
@@ -170,7 +171,7 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": True,  # Клавиатура автоматически скроется после выбора
+        "one_time_keyboard": True,  # Сворачивается сразу после выбора класса
     }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
@@ -468,7 +469,7 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD
+# YANDEX PDF DOWNLOAD (STEALTH + NETWORK INTERCEPT + UI FALLBACK)
 # ============================================================
 
 def _find_element(page, candidates):
@@ -497,6 +498,7 @@ def download_pdf():
         target.unlink()
 
     print("Скачивание расписания в формате PDF через браузер...")
+    t0 = time.time()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -522,6 +524,29 @@ def download_pdf():
 
         page = context.new_page()
 
+        # Маскировка под реального пользователя (обход анти-бота Яндекса)
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+        """)
+
+        pdf_bytes_container = []
+
+        # Перехват PDF напрямую из сети, если Яндекс выдает его фоном
+        def handle_response(response):
+            try:
+                headers = {k.lower(): v for k, v in response.headers.items()}
+                ctype = headers.get("content-type", "")
+                if "application/pdf" in ctype or response.url.endswith(".pdf"):
+                    if response.status == 200:
+                        body = response.body()
+                        if body and body.startswith(b"%PDF") and len(body) > 1000:
+                            pdf_bytes_container.append(body)
+            except Exception:
+                pass
+
+        page.on("response", handle_response)
+
         def route_filter(route):
             url = route.request.url
             if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
@@ -529,100 +554,123 @@ def download_pdf():
             return route.continue_()
 
         page.route("**/*", route_filter)
-        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
 
-        # Обязательная пауза, чтобы фреймы веб-редактора Яндекса успели смонтироваться
-        page.wait_for_timeout(3000)
+        try:
+            page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            print(f"Предупреждение при переходе по URL: {e}")
+
+        page.wait_for_timeout(3500)
+
+        # Удаление сервисных баннеров/оверлеев Яндекса
+        try:
+            page.evaluate("""
+                () => {
+                    const selectors = ['.popup', '.modal', '[class*="banner"]', '[class*="cookie"]', '[class*="dialog"]'];
+                    selectors.forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
+                }
+            """)
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
 
         download_ok = False
 
-        for attempt in range(12):
-            try:
-                file_btn = _find_element(page, [
-                    ("button", re.compile(r"^Файл$", re.I)),
-                    ("menuitem", re.compile(r"^Файл$", re.I)),
-                    re.compile(r"^Файл$", re.I),
-                    "Файл",
-                ])
+        # Проверка, не перехвачен ли файл уже из сети
+        if pdf_bytes_container:
+            target.write_bytes(pdf_bytes_container[-1])
+            download_ok = True
+            print("PDF успешно перехвачен из сетевого потока.")
 
-                direct_btn = _find_element(page, [
-                    ("button", re.compile(r"^Скачать$", re.I)),
-                    re.compile(r"^Скачать$", re.I),
-                ])
-
-                if file_btn:
-                    file_btn.click(timeout=3000, force=True)
-                    page.wait_for_timeout(500)
-
-                    download_btn = _find_element(page, [
-                        ("menuitem", re.compile(r"Скачать", re.I)),
-                        ("button", re.compile(r"Скачать", re.I)),
-                        re.compile(r"Скачать", re.I),
-                        "Скачать",
-                    ])
-                    if not download_btn:
-                        page.keyboard.press("Escape")
-                        page.wait_for_timeout(500)
-                        continue
-
-                    try:
-                        download_btn.hover(timeout=2000)
-                        download_btn.click(timeout=2000, force=True)
-                    except Exception:
-                        pass
-
-                    page.wait_for_timeout(500)
-
-                    pdf_btn = _find_element(page, [
-                        ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
-                        ("button", re.compile(r"PDF|\.pdf", re.I)),
-                        re.compile(r"Документ PDF|\.pdf|PDF", re.I),
-                        ".pdf",
-                    ])
-                    if not pdf_btn:
-                        page.keyboard.press("Escape")
-                        page.wait_for_timeout(500)
-                        continue
-
-                    print("Ожидание скачивания PDF через меню 'Файл'...")
-                    with page.expect_download(timeout=25000) as download_info:
-                        pdf_btn.click(timeout=4000, force=True)
-
-                    download = download_info.value
-                    if download.failure():
-                        raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
-
-                    download.save_as(target)
-                    print(f"PDF скачан: {target}")
-                    download_ok = True
-                    break
-
-                elif direct_btn:
-                    print("Ожидание скачивания PDF через прямую кнопку 'Скачать'...")
-                    with page.expect_download(timeout=25000) as download_info:
-                        direct_btn.click(timeout=4000, force=True)
-
-                    download = download_info.value
-                    if download.failure():
-                        raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
-
-                    download.save_as(target)
-                    print(f"PDF скачан напрямую: {target}")
-                    download_ok = True
-                    break
-
-                else:
-                    page.wait_for_timeout(1000)
-
-            except Exception as e:
-                print(f"Попытка {attempt+1} завершилась с предупреждением: {e}")
+        if not download_ok:
+            for attempt in range(10):
                 try:
                     page.keyboard.press("Escape")
-                except Exception:
-                    pass
-                page.wait_for_timeout(1000)
+
+                    file_btn = _find_element(page, [
+                        ("button", re.compile(r"^Файл$", re.I)),
+                        ("menuitem", re.compile(r"^Файл$", re.I)),
+                        re.compile(r"^Файл$", re.I),
+                        "Файл",
+                    ])
+
+                    direct_btn = _find_element(page, [
+                        ("button", re.compile(r"^Скачать$", re.I)),
+                        ("menuitem", re.compile(r"Скачать", re.I)),
+                        re.compile(r"^Скачать$", re.I),
+                        "Скачать",
+                    ])
+
+                    if file_btn:
+                        file_btn.click(timeout=3000, force=True)
+                        page.wait_for_timeout(600)
+
+                        download_btn = _find_element(page, [
+                            ("menuitem", re.compile(r"Скачать", re.I)),
+                            ("button", re.compile(r"Скачать", re.I)),
+                            re.compile(r"Скачать", re.I),
+                            "Скачать",
+                        ])
+                        if not download_btn:
+                            continue
+
+                        try:
+                            download_btn.hover(timeout=2000)
+                            download_btn.click(timeout=2000, force=True)
+                        except Exception:
+                            pass
+
+                        page.wait_for_timeout(600)
+
+                        pdf_btn = _find_element(page, [
+                            ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
+                            ("button", re.compile(r"PDF|\.pdf", re.I)),
+                            re.compile(r"Документ PDF|\.pdf|PDF", re.I),
+                            ".pdf",
+                        ])
+                        if not pdf_btn:
+                            continue
+
+                        print("Ожидание скачивания PDF через меню 'Файл'...")
+                        with page.expect_download(timeout=25000) as download_info:
+                            pdf_btn.click(timeout=4000, force=True)
+
+                        download = download_info.value
+                        if not download.failure():
+                            download.save_as(target)
+                            print(f"PDF скачан: {target}")
+                            download_ok = True
+                            break
+
+                    elif direct_btn:
+                        print("Ожидание скачивания PDF через кнопку 'Скачать'...")
+                        with page.expect_download(timeout=25000) as download_info:
+                            direct_btn.click(timeout=4000, force=True)
+
+                        download = download_info.value
+                        if not download.failure():
+                            download.save_as(target)
+                            print(f"PDF скачан напрямую: {target}")
+                            download_ok = True
+                            break
+
+                    if pdf_bytes_container:
+                        target.write_bytes(pdf_bytes_container[-1])
+                        download_ok = True
+                        print("PDF перехвачен из сетевого потока.")
+                        break
+
+                    page.wait_for_timeout(1000)
+
+                except Exception as e:
+                    print(f"Попытка {attempt+1}: {e}")
+                    page.wait_for_timeout(1000)
 
         browser.close()
+
+        if not download_ok and pdf_bytes_container:
+            target.write_bytes(pdf_bytes_container[-1])
+            download_ok = True
 
         if not download_ok or not target.exists():
             raise RuntimeError("Не удалось скачать PDF.")
@@ -630,7 +678,7 @@ def download_pdf():
     if target.stat().st_size < 1000:
         raise RuntimeError("Скачанный PDF слишком мал.")
 
-    print("PDF успешно проверен.")
+    print(f"PDF успешно проверен ({target.stat().st_size} байт, за {time.time() - t0:.1f}с).")
     return target
 
 
@@ -760,7 +808,6 @@ def fulfill_user_requests(state):
             continue
 
         try:
-            # При отправке сообщения скрываем клавиатуру (REMOVE_KEYBOARD)
             send_slide(
                 int(user_key),
                 slide_num,
@@ -873,9 +920,16 @@ def main():
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Решаем, идти ли на Яндекс
+    # 3. Решаем, идти ли на Яндекс (проверка с 12:00 до 00:00 МСК)
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
+
+    # Часовой пояс Москвы (UTC+3)
+    msk_tz = timezone(timedelta(hours=3))
+    now_msk = datetime.now(msk_tz)
+
+    # Активные часы: 12 <= час < 24
+    is_active_hours = (12 <= now_msk.hour < 24)
 
     needs_yandex = False
     for user in state["users"].values():
@@ -890,13 +944,18 @@ def main():
                 user["want_schedule"] = False
                 state_changed = True
 
-    should_fetch_yandex = (
+    should_fetch_yandex = is_active_hours and (
         time_since_last_check >= YANDEX_CHECK_INTERVAL
         or needs_yandex
     )
 
-    if should_fetch_yandex:
-        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с)...")
+    if not is_active_hours:
+        print(
+            f"Пропуск скачивания с Яндекса: сейчас {now_msk.strftime('%H:%M')} МСК "
+            f"(проверка работает только с 12:00 до 00:00 МСК)."
+        )
+    elif should_fetch_yandex:
+        print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с, время {now_msk.strftime('%H:%M')} МСК)...")
         schedule_changed = False
 
         try:
