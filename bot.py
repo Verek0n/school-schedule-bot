@@ -920,7 +920,7 @@ def main():
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Решаем, идти ли на Яндекс (проверка с 12:00 до 00:00 МСК)
+    # 3. Решаем, идти ли на Яндекс (проверка с 12:00 до 01:00 МСК)
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
@@ -928,8 +928,8 @@ def main():
     msk_tz = timezone(timedelta(hours=3))
     now_msk = datetime.now(msk_tz)
 
-    # Активные часы: 12 <= час < 24
-    is_active_hours = (12 <= now_msk.hour < 24)
+    # Активные часы: с 12:00 дня до 01:00 ночи МСК (т.е. часы 12..23 и 0)
+    is_active_hours = (now_msk.hour >= 12 or now_msk.hour == 0)
 
     needs_yandex = False
     for user in state["users"].values():
@@ -952,7 +952,7 @@ def main():
     if not is_active_hours:
         print(
             f"Пропуск скачивания с Яндекса: сейчас {now_msk.strftime('%H:%M')} МСК "
-            f"(проверка работает только с 12:00 до 00:00 МСК)."
+            f"(проверка работает только с 12:00 до 01:00 МСК)."
         )
     elif should_fetch_yandex:
         print(f"Идем проверять Яндекс (прошло {int(time_since_last_check)}с, время {now_msk.strftime('%H:%M')} МСК)...")
