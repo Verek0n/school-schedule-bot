@@ -170,7 +170,7 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": True,  # Клавиатура скроется сразу после нажатия
+        "one_time_keyboard": True,  # Клавиатура автоматически скроется после выбора
     }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
@@ -471,6 +471,26 @@ def process_commands(state):
 # YANDEX PDF DOWNLOAD
 # ============================================================
 
+def _find_element(page, candidates):
+    roots = [page] + list(page.frames)
+    for root in roots:
+        for item in candidates:
+            try:
+                if isinstance(item, tuple):
+                    role, pattern = item
+                    loc = root.get_by_role(role, name=pattern)
+                elif isinstance(item, str):
+                    loc = root.get_by_text(item, exact=False)
+                else:
+                    loc = root.get_by_text(item)
+
+                if loc.count() > 0 and loc.first.is_visible():
+                    return loc.first
+            except Exception:
+                continue
+    return None
+
+
 def download_pdf():
     target = WORK / "source.pdf"
     if target.exists():
@@ -504,112 +524,103 @@ def download_pdf():
 
         def route_filter(route):
             url = route.request.url
-            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika", "an.yandex.ru"]):
+            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
                 return route.abort()
             return route.continue_()
 
         page.route("**/*", route_filter)
+        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
 
-        print("Загрузка страницы Яндекса...")
-        try:
-            page.goto(SOURCE_URL, wait_until="load", timeout=45000)
-            page.wait_for_timeout(5000)
-        except Exception as e:
-            print(f"Предупреждение при переходе по URL: {e}")
+        # Обязательная пауза, чтобы фреймы веб-редактора Яндекса успели смонтироваться
+        page.wait_for_timeout(3000)
 
         download_ok = False
 
         for attempt in range(12):
             try:
-                all_frames = [page] + list(page.frames)
+                file_btn = _find_element(page, [
+                    ("button", re.compile(r"^Файл$", re.I)),
+                    ("menuitem", re.compile(r"^Файл$", re.I)),
+                    re.compile(r"^Файл$", re.I),
+                    "Файл",
+                ])
 
-                file_btn = None
-                for frame in all_frames:
-                    try:
-                        loc = frame.get_by_text("Файл", exact=True)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            file_btn = loc.first
-                            break
-                        loc_role = frame.get_by_role("button", name=re.compile(r"^Файл$", re.I))
-                        if loc_role.count() > 0 and loc_role.first.is_visible():
-                            file_btn = loc_role.first
-                            break
-                    except Exception:
+                direct_btn = _find_element(page, [
+                    ("button", re.compile(r"^Скачать$", re.I)),
+                    re.compile(r"^Скачать$", re.I),
+                ])
+
+                if file_btn:
+                    file_btn.click(timeout=3000, force=True)
+                    page.wait_for_timeout(500)
+
+                    download_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"Скачать", re.I)),
+                        ("button", re.compile(r"Скачать", re.I)),
+                        re.compile(r"Скачать", re.I),
+                        "Скачать",
+                    ])
+                    if not download_btn:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(500)
                         continue
 
-                if not file_btn:
-                    print(f"Попытка {attempt+1}: Ожидание появления кнопки 'Файл'...")
-                    page.wait_for_timeout(2000)
-                    continue
-
-                print("Клик по меню 'Файл'...")
-                file_btn.click(timeout=3000, force=True)
-                page.wait_for_timeout(1000)
-
-                all_frames = [page] + list(page.frames)
-                download_btn = None
-                for frame in all_frames:
                     try:
-                        loc = frame.get_by_text("Скачать", exact=False)
-                        if loc.count() > 0 and loc.first.is_visible():
-                            download_btn = loc.first
-                            break
+                        download_btn.hover(timeout=2000)
+                        download_btn.click(timeout=2000, force=True)
                     except Exception:
+                        pass
+
+                    page.wait_for_timeout(500)
+
+                    pdf_btn = _find_element(page, [
+                        ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
+                        ("button", re.compile(r"PDF|\.pdf", re.I)),
+                        re.compile(r"Документ PDF|\.pdf|PDF", re.I),
+                        ".pdf",
+                    ])
+                    if not pdf_btn:
+                        page.keyboard.press("Escape")
+                        page.wait_for_timeout(500)
                         continue
 
-                if not download_btn:
-                    page.keyboard.press("Escape")
+                    print("Ожидание скачивания PDF через меню 'Файл'...")
+                    with page.expect_download(timeout=25000) as download_info:
+                        pdf_btn.click(timeout=4000, force=True)
+
+                    download = download_info.value
+                    if download.failure():
+                        raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
+
+                    download.save_as(target)
+                    print(f"PDF скачан: {target}")
+                    download_ok = True
+                    break
+
+                elif direct_btn:
+                    print("Ожидание скачивания PDF через прямую кнопку 'Скачать'...")
+                    with page.expect_download(timeout=25000) as download_info:
+                        direct_btn.click(timeout=4000, force=True)
+
+                    download = download_info.value
+                    if download.failure():
+                        raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
+
+                    download.save_as(target)
+                    print(f"PDF скачан напрямую: {target}")
+                    download_ok = True
+                    break
+
+                else:
                     page.wait_for_timeout(1000)
-                    continue
-
-                print("Наведение / клик по 'Скачать'...")
-                try:
-                    download_btn.hover(timeout=2000)
-                except Exception:
-                    pass
-                try:
-                    download_btn.click(timeout=2000, force=True)
-                except Exception:
-                    pass
-
-                page.wait_for_timeout(1000)
-
-                all_frames = [page] + list(page.frames)
-                pdf_btn = None
-                for frame in all_frames:
-                    try:
-                        loc = frame.get_by_text(re.compile(r"Документ PDF|\.pdf|PDF", re.I))
-                        if loc.count() > 0 and loc.first.is_visible():
-                            pdf_btn = loc.first
-                            break
-                    except Exception:
-                        continue
-
-                if not pdf_btn:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(1000)
-                    continue
-
-                print("Ожидание скачивания PDF...")
-                with page.expect_download(timeout=30000) as download_info:
-                    pdf_btn.click(timeout=4000, force=True)
-
-                download = download_info.value
-                if download.failure():
-                    raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
-
-                download.save_as(target)
-                print(f"PDF скачан: {target}")
-                download_ok = True
-                break
 
             except Exception as e:
-                print(f"Ошибка на попытке {attempt+1}: {e}")
+                print(f"Попытка {attempt+1} завершилась с предупреждением: {e}")
                 try:
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1000)
 
         browser.close()
 
@@ -668,7 +679,7 @@ def make_schedule(pdf_path):
 
 
 # ============================================================
-# WARMUP CACHE
+# WARMUP CACHE — загружаем все 5 слайдов в Telegram сразу
 # ============================================================
 
 def warmup_cache(state, slides):
@@ -749,7 +760,7 @@ def fulfill_user_requests(state):
             continue
 
         try:
-            # При отправке расписания прячем клавиатуру полностью (REMOVE_KEYBOARD)
+            # При отправке сообщения скрываем клавиатуру (REMOVE_KEYBOARD)
             send_slide(
                 int(user_key),
                 slide_num,
