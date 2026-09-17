@@ -89,7 +89,7 @@ def telegram(method, data=None, upload=None):
                     "photo": (
                         upload_path.name,
                         upload_path.open("rb"),
-                        "image/png",
+                        "image/jpeg",
                     )
                 }
 
@@ -173,7 +173,7 @@ def class_keyboard():
     return {
         "keyboard": rows,
         "resize_keyboard": True,
-        "one_time_keyboard": False,
+        "one_time_keyboard": True,  # Клавиатура скроется после одного нажатия
     }
 
 REMOVE_KEYBOARD = {"remove_keyboard": True}
@@ -607,11 +607,11 @@ def download_pdf():
 
 
 # ============================================================
-# PDF -> 5 PNG
+# PDF -> 5 JPG (ВЫСОКОЕ КАЧЕСТВО)
 # ============================================================
 
 def make_schedule(pdf_path):
-    print("Рендер PDF в PNG...")
+    print("Рендер PDF в высококачественный JPG (300 DPI)...")
     doc = pymupdf.open(pdf_path)
     slides = []
 
@@ -622,7 +622,8 @@ def make_schedule(pdf_path):
         if page_count < 5:
             raise RuntimeError(f"Ожидалось минимум 5 страниц, получено {page_count}.")
 
-        matrix = pymupdf.Matrix(150 / 72, 150 / 72)
+        # 300 DPI обеспечивает отличную читаемость шрифтов
+        matrix = pymupdf.Matrix(300 / 72, 300 / 72)
 
         for slide_number in range(1, 6):
             page = doc[slide_number - 1]
@@ -632,17 +633,18 @@ def make_schedule(pdf_path):
                 colorspace=pymupdf.csRGB,
             )
 
-            png_path = WORK / f"slide_{slide_number}.png"
-            pix.save(str(png_path))
+            jpg_path = WORK / f"slide_{slide_number}.jpg"
+            # Сохранение в JPG с качеством 95%
+            pix.save(str(jpg_path), output="jpg", jpg_quality=95)
 
-            image_hash = hashlib.sha256(png_path.read_bytes()).hexdigest()
+            image_hash = hashlib.sha256(jpg_path.read_bytes()).hexdigest()
             slides.append({
                 "number": slide_number,
-                "path": png_path,
+                "path": jpg_path,
                 "hash": image_hash,
             })
 
-            print(f"Слайд {slide_number}: {png_path.name}, hash={image_hash[:12]}")
+            print(f"Слайд {slide_number}: {jpg_path.name}, hash={image_hash[:12]}")
 
         return slides
 
@@ -657,8 +659,7 @@ def make_schedule(pdf_path):
 def warmup_cache(state, slides):
     """
     Для каждого слайда, у которого hash изменился (или file_id пуст),
-    отправляет PNG в чат админа, получает file_id, удаляет сообщение.
-    Админ ничего не увидит.
+    отправляет JPG в чат админа, получает file_id, удаляет сообщение.
     """
     changed = False
 
@@ -666,18 +667,15 @@ def warmup_cache(state, slides):
         idx = slide["number"] - 1
         old = state["latest"]["slides"][idx]
 
-        # Если hash тот же и file_id уже есть — пропускаем
         if old.get("hash") == slide["hash"] and old.get("file_id"):
             continue
 
-        # Отправляем в чат админа
         try:
             result = send_photo(
                 ADMIN_CHAT_ID,
                 photo_path=slide["path"],
             )
 
-            # Получаем message_id и file_id
             message_id = result.get("message_id")
             photos = result.get("photo", [])
 
@@ -690,7 +688,6 @@ def warmup_cache(state, slides):
             else:
                 print(f"Кэш: слайд {slide['number']} — не удалось получить file_id.")
 
-            # Удаляем сообщение, чтобы админ его не видел
             if message_id:
                 delete_message(ADMIN_CHAT_ID, message_id)
 
@@ -738,13 +735,14 @@ def fulfill_user_requests(state):
             continue
 
         try:
+            # Отправляем расписание и убираем кнопки клавиатуры
             send_slide(
                 int(user_key),
                 slide_num,
                 None,
                 file_id=file_id,
                 caption=f"Расписание «{selected_class}»",
-                keyboard=class_keyboard()
+                keyboard=REMOVE_KEYBOARD
             )
             user["sent"] = cached.get("hash")
             user["want_schedule"] = False
@@ -802,6 +800,7 @@ def broadcast(state, slides, schedule_changed):
             else:
                 caption = f"Расписание «{selected_class}»"
 
+            # При любой отправке расписания прячем кнопки
             if cached_file_id:
                 send_slide(
                     chat_id,
@@ -809,7 +808,7 @@ def broadcast(state, slides, schedule_changed):
                     current_slide["path"],
                     file_id=cached_file_id,
                     caption=caption,
-                    keyboard=class_keyboard(),
+                    keyboard=REMOVE_KEYBOARD,
                 )
             else:
                 send_slide(
@@ -818,7 +817,7 @@ def broadcast(state, slides, schedule_changed):
                     current_slide["path"],
                     file_id=None,
                     caption=caption,
-                    keyboard=class_keyboard(),
+                    keyboard=REMOVE_KEYBOARD,
                 )
 
             user["sent"] = current_hash
@@ -856,16 +855,15 @@ def main():
     print("Получение новых сообщений Telegram...")
     state_changed = process_commands(state)
 
-    # 2. Быстро отвечаем из кэша
+    # 2. Быстро отвечаем из имеющегося кэша
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Решаем, идти ли на Яндекс
+    # 3. Решаем, идти ли на Яндекс за новым расписанием
     now = time.time()
     time_since_last_check = now - state.get("last_yandex_check", 0)
 
-    # Идём на Яндекс если прошло время интервала
-    # ИЛИ если есть запрос на слайд, которого ещё нет в кэше (первый запуск бота)
+    # Проверяем, есть ли запросы на слайды, которых вообще нет в кэше
     needs_yandex = False
     for user in state["users"].values():
         if user.get("want_schedule"):
@@ -881,12 +879,14 @@ def main():
 
     # Вычисляем текущее московское время (UTC+3)
     msk_now = datetime.now(MSK_TZ)
-    # Проверяем диапазон: от 12:00 до 00:00 (то есть час >= 12 и < 24)
+    # Проверяем диапазон: строго от 12:00 до 00:00 (час >= 12)
     is_active_hours = (12 <= msk_now.hour < 24)
 
-    should_fetch_yandex = (
-        (time_since_last_check >= YANDEX_CHECK_INTERVAL and is_active_hours)
-        or needs_yandex
+    # СТРОГИЕ ПРАВИЛА:
+    # Скачивание происходит ТОЛЬКО в активные часы (12:00 - 00:00 МСК) И:
+    # либо прошло 30 минут (1800 сек), либо слайда вообще нет в кэше.
+    should_fetch_yandex = is_active_hours and (
+        time_since_last_check >= YANDEX_CHECK_INTERVAL or needs_yandex
     )
 
     if should_fetch_yandex:
@@ -908,11 +908,11 @@ def main():
             else:
                 print("Расписание не изменилось.")
 
-            # Загружаем все 5 слайдов в кэш Telegram
+            # Загружаем все 5 слайдов в кэш Telegram (в высоком JPG)
             if warmup_cache(state, slides):
                 state_changed = True
 
-            # Рассылаем тем, кому нужно
+            # Рассылаем тем, кому нужно новое расписание
             broadcast(state, slides, schedule_changed)
 
             state["last_yandex_check"] = now
@@ -922,7 +922,10 @@ def main():
             print(f"Ошибка расписания: {e}")
             print("Старое расписание сохранено.")
     else:
-        reason = f"не входит в диапазон 12:00-00:00 МСК ({msk_now.strftime('%H:%M')})" if not is_active_hours else f"прошло {int(time_since_last_check)}с из {YANDEX_CHECK_INTERVAL}с"
+        if not is_active_hours:
+            reason = f"не входит в диапазон 12:00-00:00 МСК ({msk_now.strftime('%H:%M')})"
+        else:
+            reason = f"прошло всего {int(time_since_last_check)}с из требуемых {YANDEX_CHECK_INTERVAL}с"
         print(f"Пропуск скачивания с Яндекса ({reason})")
 
     # 4. Сохраняем состояние
