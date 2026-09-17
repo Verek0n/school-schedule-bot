@@ -1,6 +1,7 @@
 name: School Schedule Bot
 
 on:
+  # ВАЖНО: Этот триггер позволяет запускать workflow извне через GitHub API/webhook
   workflow_dispatch:
 
 permissions:
