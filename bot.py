@@ -2,7 +2,6 @@ import base64
 import hashlib
 import json
 import os
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,16 +10,15 @@ import pymupdf
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from playwright.sync_api import sync_playwright
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-SOURCE_URL = (
-    "https://docs.yandex.ru/view/d/"
-    "zQH249qvBK21O7SXl-9z_SPegnqahzm72s0qoIz-cKg6eG1uRGNFdE5adw"
-)
+# PDF теперь лежит на сайте школы и скачивается напрямую, без браузера.
+# Число в конце ссылки (?1790944044) — метка времени для обхода кэша,
+# поэтому при скачивании подставляем текущее время.
+SOURCE_URL = "https://school9kirov.gosuslugi.ru/netcat_files/30/69/ZAMENY.pdf"
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STATE_TOKEN = os.environ["STATE_TOKEN"]
@@ -28,8 +26,8 @@ STATE_TOKEN = os.environ["STATE_TOKEN"]
 # В чат админа отправляем фото для получения file_id, затем удаляем
 ADMIN_CHAT_ID = 1334717692
 
-# Интервал проверки Яндекса: 1800 секунд = 30 минут
-YANDEX_CHECK_INTERVAL = 1800
+# Интервал проверки сайта с расписанием: 1800 секунд = 30 минут
+SOURCE_CHECK_INTERVAL = 1800
 
 # Часовой пояс Москвы (UTC+3)
 MSK_TZ = timezone(timedelta(hours=3))
@@ -186,7 +184,7 @@ REMOVE_KEYBOARD = {"remove_keyboard": True}
 def default_state():
     return {
         "offset": 0,
-        "last_yandex_check": 0,
+        "last_source_check": 0,
         "users": {},
         "latest": {
             "slides": [
@@ -210,7 +208,13 @@ def load_state():
         state = json.loads(content)
 
         state.setdefault("offset", 0)
-        state.setdefault("last_yandex_check", 0)
+
+        # Миграция со старого state.json: раньше ключ назывался last_yandex_check
+        if "last_source_check" not in state:
+            state["last_source_check"] = state.pop("last_yandex_check", 0)
+        else:
+            state.pop("last_yandex_check", None)
+
         state.setdefault("users", {})
         state.setdefault("latest", {})
 
@@ -327,7 +331,7 @@ def process_commands(state):
                                 fail_count += 1
 
                         send_message(
-                            chat_id, 
+                            chat_id,
                             f"Рассылка завершена.\nУспешно: {success_count}\nОшибок/Удалено: {fail_count}"
                         )
                     else:
@@ -471,139 +475,58 @@ def process_commands(state):
 
 
 # ============================================================
-# YANDEX PDF DOWNLOAD
+# PDF DOWNLOAD (ПРЯМАЯ ССЫЛКА, БЕЗ БРАУЗЕРА)
 # ============================================================
-
-def _find_element(page, candidates):
-    roots = [page] + list(page.frames)
-    for root in roots:
-        for item in candidates:
-            try:
-                if isinstance(item, tuple):
-                    role, pattern = item
-                    loc = root.get_by_role(role, name=pattern)
-                elif isinstance(item, str):
-                    loc = root.get_by_text(item, exact=False)
-                else:
-                    loc = root.get_by_text(item)
-
-                if loc.count() > 0 and loc.first.is_visible():
-                    return loc.first
-            except Exception:
-                continue
-    return None
-
 
 def download_pdf():
     target = WORK / "source.pdf"
     if target.exists():
         target.unlink()
 
-    print("Скачивание расписания в формате PDF через браузер...")
+    print("Скачивание расписания в PDF напрямую с сайта школы...")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+    # Метка времени в конце ссылки обходит кэш (как ?1790944044 на сайте)
+    url = f"{SOURCE_URL}?{int(time.time())}"
 
-        context = browser.new_context(
-            accept_downloads=True,
-            locale="ru-RU",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1920, "height": 1080},
-        )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,*/*",
+        "Referer": "https://school9kirov.gosuslugi.ru/",
+    }
 
-        page = context.new_page()
+    last_error = None
 
-        def route_filter(route):
-            url = route.request.url
-            if any(x in url for x in ["mc.yandex.ru", "yandex.ru/clck", "metrika"]):
-                return route.abort()
-            return route.continue_()
+    for attempt in range(5):
+        try:
+            with session.get(url, headers=headers, timeout=(10, 60), stream=True) as response:
+                response.raise_for_status()
+                with target.open("wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
 
-        page.route("**/*", route_filter)
-        page.goto(SOURCE_URL, wait_until="domcontentloaded", timeout=45000)
+            data = target.read_bytes()
+            if len(data) < 1000:
+                raise RuntimeError("Скачанный PDF слишком мал.")
+            if not data.startswith(b"%PDF"):
+                raise RuntimeError("Скачанный файл не является PDF.")
 
-        download_ok = False
+            print(f"PDF скачан: {target} ({len(data)} байт)")
+            print("PDF успешно проверен.")
+            return target
 
-        for _ in range(8):
-            try:
-                file_btn = _find_element(page, [
-                    ("button", re.compile(r"^Файл$", re.I)),
-                    ("menuitem", re.compile(r"^Файл$", re.I)),
-                    re.compile(r"^Файл$", re.I),
-                    "Файл",
-                ])
-                if not file_btn:
-                    page.wait_for_timeout(1000)
-                    continue
+        except Exception as e:
+            last_error = e
+            print(f"Попытка скачивания {attempt + 1}/5 не удалась: {e}")
+            if target.exists():
+                target.unlink()
+            time.sleep(2)
 
-                file_btn.click(timeout=3000)
-
-                download_btn = _find_element(page, [
-                    ("menuitem", re.compile(r"Скачать", re.I)),
-                    ("button", re.compile(r"Скачать", re.I)),
-                    re.compile(r"Скачать", re.I),
-                    "Скачать",
-                ])
-                if not download_btn:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                    continue
-
-                try:
-                    download_btn.hover(timeout=2000)
-                    download_btn.click(timeout=2000)
-                except Exception:
-                    pass
-
-                pdf_btn = _find_element(page, [
-                    ("menuitem", re.compile(r"PDF|\.pdf", re.I)),
-                    ("button", re.compile(r"PDF|\.pdf", re.I)),
-                    re.compile(r"Документ PDF|\.pdf|PDF", re.I),
-                    ".pdf",
-                ])
-                if not pdf_btn:
-                    page.keyboard.press("Escape")
-                    page.wait_for_timeout(500)
-                    continue
-
-                print("Ожидание скачивания PDF...")
-                with page.expect_download(timeout=25000) as download_info:
-                    pdf_btn.click(timeout=4000, force=True)
-
-                download = download_info.value
-                if download.failure():
-                    raise RuntimeError(f"Ошибка скачивания: {download.failure()}")
-
-                download.save_as(target)
-                print(f"PDF скачан: {target}")
-                download_ok = True
-                break
-
-            except Exception:
-                page.wait_for_timeout(1000)
-
-        browser.close()
-
-        if not download_ok or not target.exists():
-            raise RuntimeError("Не удалось скачать PDF.")
-
-    if target.stat().st_size < 1000:
-        raise RuntimeError("Скачанный PDF слишком мал.")
-
-    print("PDF успешно проверен.")
-    return target
+    raise RuntimeError(f"Не удалось скачать PDF: {last_error}")
 
 
 # ============================================================
@@ -859,19 +782,19 @@ def main():
     if fulfill_user_requests(state):
         state_changed = True
 
-    # 3. Решаем, идти ли на Яндекс за новым расписанием
+    # 3. Решаем, идти ли на сайт за новым расписанием
     now = time.time()
-    time_since_last_check = now - state.get("last_yandex_check", 0)
+    time_since_last_check = now - state.get("last_source_check", 0)
 
     # Проверяем, есть ли запросы на слайды, которых вообще нет в кэше
-    needs_yandex = False
+    needs_source = False
     for user in state["users"].values():
         if user.get("want_schedule"):
             cls = user.get("class")
             if cls and cls in CLASS_TO_SLIDE:
                 idx = CLASS_TO_SLIDE[cls] - 1
                 if not state["latest"]["slides"][idx].get("file_id"):
-                    needs_yandex = True
+                    needs_source = True
                     break
             else:
                 user["want_schedule"] = False
@@ -885,12 +808,12 @@ def main():
     # СТРОГИЕ ПРАВИЛА:
     # Скачивание происходит ТОЛЬКО в активные часы (12:00 - 00:00 МСК) И:
     # либо прошло 30 минут (1800 сек), либо слайда вообще нет в кэше.
-    should_fetch_yandex = is_active_hours and (
-        time_since_last_check >= YANDEX_CHECK_INTERVAL or needs_yandex
+    should_fetch_source = is_active_hours and (
+        time_since_last_check >= SOURCE_CHECK_INTERVAL or needs_source
     )
 
-    if should_fetch_yandex:
-        print(f"Идем проверять Яндекс (МСК: {msk_now.strftime('%H:%M:%S')}, прошло {int(time_since_last_check)}с)...")
+    if should_fetch_source:
+        print(f"Идем проверять источник расписания (МСК: {msk_now.strftime('%H:%M:%S')}, прошло {int(time_since_last_check)}с)...")
         schedule_changed = False
 
         try:
@@ -915,7 +838,7 @@ def main():
             # Рассылаем тем, кому нужно новое расписание
             broadcast(state, slides, schedule_changed)
 
-            state["last_yandex_check"] = now
+            state["last_source_check"] = now
             state_changed = True
 
         except Exception as e:
@@ -925,8 +848,8 @@ def main():
         if not is_active_hours:
             reason = f"не входит в диапазон 12:00-00:00 МСК ({msk_now.strftime('%H:%M')})"
         else:
-            reason = f"прошло всего {int(time_since_last_check)}с из требуемых {YANDEX_CHECK_INTERVAL}с"
-        print(f"Пропуск скачивания с Яндекса ({reason})")
+            reason = f"прошло всего {int(time_since_last_check)}с из требуемых {SOURCE_CHECK_INTERVAL}с"
+        print(f"Пропуск скачивания расписания ({reason})")
 
     # 4. Сохраняем состояние
     if state_changed:
