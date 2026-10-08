@@ -27,7 +27,7 @@ STATE_TOKEN = os.environ["STATE_TOKEN"]
 ADMIN_CHAT_ID = 1334717692
 
 # Интервал проверки сайта с расписанием: 1800 секунд = 30 минут
-SOURCE_CHECK_INTERVAL = 1800
+SOURCE_CHECK_INTERVAL = 2000
 
 # Часовой пояс Москвы (UTC+3)
 MSK_TZ = timezone(timedelta(hours=3))
@@ -803,7 +803,7 @@ def main():
     # Вычисляем текущее московское время (UTC+3)
     msk_now = datetime.now(MSK_TZ)
     # Проверяем диапазон: строго от 12:00 до 00:00 (час >= 12)
-    is_active_hours = (12 <= msk_now.hour < 24)
+    is_active_hours = (12 <= msk_now.hour < 22)
 
     # СТРОГИЕ ПРАВИЛА:
     # Скачивание происходит ТОЛЬКО в активные часы (12:00 - 00:00 МСК) И:
