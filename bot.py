@@ -2,9 +2,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pymupdf
 import requests
@@ -15,10 +17,9 @@ from urllib3.util.retry import Retry
 # CONFIG
 # ============================================================
 
-# PDF теперь лежит на сайте школы и скачивается напрямую, без браузера.
-# Число в конце ссылки (?1790944044) — метка времени для обхода кэша,
-# поэтому при скачивании подставляем текущее время.
-SOURCE_URL = "https://school9kirov.gosuslugi.ru/netcat_files/30/69/ZAMENY.pdf"
+# Страница школы, где опубликована кнопка «Скачать» для файла расписания замен.
+# Прямую ссылку на PDF вытаскиваем парсингом HTML — она может меняться со временем.
+SOURCE_PAGE_URL = "https://shkola9kirov-r43.gosweb.gosuslugi.ru/svedeniya-ob-obrazovatelnoy-organizatsii/dokumenty/dokumenty-all_982.html"
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 STATE_TOKEN = os.environ["STATE_TOKEN"]
@@ -475,8 +476,53 @@ def process_commands(state):
 
 
 # ============================================================
-# PDF DOWNLOAD (ПРЯМАЯ ССЫЛКА, БЕЗ БРАУЗЕРА)
+# PDF DOWNLOAD (ПАРСИНГ СТРАНИЦЫ ГОСУСЛУГ -> ССЫЛКА «СКАЧАТЬ»)
 # ============================================================
+
+def find_pdf_url_on_page():
+    """
+    Загружает HTML-страницу школы и ищет ссылку на PDF расписания замен
+    (кнопка «Скачать»). Возвращает абсолютный URL.
+    """
+    print("Поиск прямой ссылки на PDF на странице школы...")
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    response = session.get(SOURCE_PAGE_URL, headers=headers, timeout=(10, 30))
+    response.raise_for_status()
+    html = response.text
+
+    # Ищем все ссылки, в которых упоминается PDF
+    # Разные варианты: href="...pdf", href='...pdf', href="...PDF?..."
+    pdf_links = re.findall(
+        r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']',
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    if not pdf_links:
+        raise RuntimeError("На странице школы не найдено ни одной PDF-ссылки.")
+
+    # Приоритет — ссылки, где в URL или рядом в тексте явно упоминается ZAMENY / замен
+    preferred = None
+    for link in pdf_links:
+        low = link.lower()
+        if "zameny" in low or "замен" in low:
+            preferred = link
+            break
+
+    chosen = preferred or pdf_links[0]
+    absolute = urljoin(SOURCE_PAGE_URL, chosen)
+    print(f"Выбрана ссылка на PDF: {absolute}")
+    return absolute
+
 
 def download_pdf():
     target = WORK / "source.pdf"
@@ -485,8 +531,10 @@ def download_pdf():
 
     print("Скачивание расписания в PDF напрямую с сайта школы...")
 
-    # Метка времени в конце ссылки обходит кэш (как ?1790944044 на сайте)
-    url = f"{SOURCE_URL}?{int(time.time())}"
+    pdf_url = find_pdf_url_on_page()
+    # Метка времени в конце ссылки обходит кэш
+    sep = "&" if "?" in pdf_url else "?"
+    url = f"{pdf_url}{sep}{int(time.time())}"
 
     headers = {
         "User-Agent": (
@@ -495,7 +543,7 @@ def download_pdf():
             "Chrome/124.0.0.0 Safari/537.36"
         ),
         "Accept": "application/pdf,*/*",
-        "Referer": "https://school9kirov.gosuslugi.ru/",
+        "Referer": SOURCE_PAGE_URL,
     }
 
     last_error = None
