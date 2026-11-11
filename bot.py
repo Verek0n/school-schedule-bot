@@ -18,7 +18,7 @@ from urllib3.util.retry import Retry
 # ============================================================
 
 # Страница школы, где опубликована кнопка «Скачать» для файла расписания замен.
-# Прямую ссылку на PDF вытаскиваем парсингом HTML — она может меняться со временем.
+# Прямую ссылку на PDF и дату расписания вытаскиваем парсингом HTML.
 SOURCE_PAGE_URL = "https://shkola9kirov-r43.gosweb.gosuslugi.ru/svedeniya-ob-obrazovatelnoy-organizatsii/dokumenty/dokumenty-all_982.html"
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -188,6 +188,7 @@ def default_state():
         "last_source_check": 0,
         "users": {},
         "latest": {
+            "source_date": None,
             "slides": [
                 {"hash": None, "file_id": None} for _ in range(5)
             ]
@@ -226,6 +227,8 @@ def load_state():
 
         while len(state["latest"]["slides"]) < 5:
             state["latest"]["slides"].append({"hash": None, "file_id": None})
+
+        state["latest"].setdefault("source_date", None)
 
         return state, payload["sha"]
 
@@ -451,9 +454,8 @@ def process_commands(state):
                 send_message(
                     chat_id,
                     (
-                        "Я умею только выполнять команды:\n"
+                        "Это конечно прикольно,но я умею только:\n"
                         "/schedule - Получить расписание\n"
-                        "/class - Изменить свой класс\n"
                         "/start - Подписаться на расписание\n"
                         "/stop - Отключить рассылку"
                     ),
@@ -476,15 +478,19 @@ def process_commands(state):
 
 
 # ============================================================
-# PDF DOWNLOAD (ПАРСИНГ СТРАНИЦЫ ГОСУСЛУГ -> ССЫЛКА «СКАЧАТЬ»)
+# PARSE SOURCE PAGE (один запрос → PDF-ссылка + дата расписания)
 # ============================================================
 
-def find_pdf_url_on_page():
+def parse_source_page():
     """
-    Загружает HTML-страницу школы и ищет ссылку на PDF расписания замен
-    (кнопка «Скачать»). Возвращает абсолютный URL.
+    Загружает HTML-страницу школы и одним запросом извлекает:
+      • прямую ссылку на PDF расписания замен (кнопка «Скачать»);
+      • дату расписания, указанную на странице (DD.MM.YYYY).
+
+    Возвращает кортеж (pdf_url, schedule_date).
+    Если что-то не найдено — соответствующее значение None.
     """
-    print("Поиск прямой ссылки на PDF на странице школы...")
+    print("Загрузка страницы школы для поиска PDF-ссылки и даты...")
 
     headers = {
         "User-Agent": (
@@ -499,18 +505,13 @@ def find_pdf_url_on_page():
     response.raise_for_status()
     html = response.text
 
-    # Ищем все ссылки, в которых упоминается PDF
-    # Разные варианты: href="...pdf", href='...pdf', href="...PDF?..."
+    # --- 1. Прямая ссылка на PDF ---
     pdf_links = re.findall(
         r'href=["\']([^"\']+\.pdf(?:\?[^"\']*)?)["\']',
         html,
         flags=re.IGNORECASE,
     )
 
-    if not pdf_links:
-        raise RuntimeError("На странице школы не найдено ни одной PDF-ссылки.")
-
-    # Приоритет — ссылки, где в URL или рядом в тексте явно упоминается ZAMENY / замен
     preferred = None
     for link in pdf_links:
         low = link.lower()
@@ -518,20 +519,41 @@ def find_pdf_url_on_page():
             preferred = link
             break
 
-    chosen = preferred or pdf_links[0]
-    absolute = urljoin(SOURCE_PAGE_URL, chosen)
-    print(f"Выбрана ссылка на PDF: {absolute}")
-    return absolute
+    chosen = preferred or (pdf_links[0] if pdf_links else None)
+    pdf_url = urljoin(SOURCE_PAGE_URL, chosen) if chosen else None
+
+    # --- 2. Дата расписания (DD.MM.YYYY) ---
+    schedule_date = None
+
+    # Сначала ищем дату в контексте слова «замен» (±200 символов)
+    for match in re.finditer(r'.{0,200}замен.{0,200}', html, re.IGNORECASE | re.DOTALL):
+        ctx_dates = re.findall(r'\d{1,2}\.\d{1,2}\.\d{4}', match.group())
+        if ctx_dates:
+            schedule_date = ctx_dates[-1]
+            break
+
+    # Если не нашли рядом с «замен» — берём последнюю дату на странице
+    if not schedule_date:
+        all_dates = re.findall(r'\d{1,2}\.\d{1,2}\.\d{4}', html)
+        if all_dates:
+            schedule_date = all_dates[-1]
+
+    print(f"  PDF-ссылка : {pdf_url}")
+    print(f"  Дата на стр.: {schedule_date}")
+    return pdf_url, schedule_date
 
 
-def download_pdf():
+# ============================================================
+# PDF DOWNLOAD (ПРЯМАЯ ССЫЛКА, БЕЗ БРАУЗЕРА)
+# ============================================================
+
+def download_pdf(pdf_url):
     target = WORK / "source.pdf"
     if target.exists():
         target.unlink()
 
     print("Скачивание расписания в PDF напрямую с сайта школы...")
 
-    pdf_url = find_pdf_url_on_page()
     # Метка времени в конце ссылки обходит кэш
     sep = "&" if "?" in pdf_url else "?"
     url = f"{pdf_url}{sep}{int(time.time())}"
@@ -865,29 +887,50 @@ def main():
         schedule_changed = False
 
         try:
-            pdf_path = download_pdf()
-            slides = make_schedule(pdf_path)
+            # Парсим страницу: получаем URL и дату расписания (один HTTP-запрос)
+            pdf_url, page_date = parse_source_page()
 
-            # Проверяем, изменилось ли расписание
-            for slide in slides:
-                idx = slide["number"] - 1
-                if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
-                    schedule_changed = True
+            if not pdf_url:
+                raise RuntimeError("На странице школы не найдена ссылка на PDF.")
 
-            if schedule_changed:
-                print("Расписание изменилось.")
-            else:
-                print("Расписание не изменилось.")
-
-            # Загружаем все 5 слайдов в кэш Telegram (в высоком JPG)
-            if warmup_cache(state, slides):
+            # Быстрая проверка: если дата на странице не изменилась
+            # и нет срочных запросов — пропускаем тяжёлое скачивание PDF
+            saved_date = state["latest"].get("source_date")
+            if page_date and page_date == saved_date and not needs_source:
+                print(f"Дата расписания не изменилась ({page_date}), пропуск скачивания PDF.")
+                state["last_source_check"] = now
                 state_changed = True
+            else:
+                if page_date:
+                    print(f"Дата расписания: {page_date} (сохранённая: {saved_date})")
 
-            # Рассылаем тем, кому нужно новое расписание
-            broadcast(state, slides, schedule_changed)
+                pdf_path = download_pdf(pdf_url)
+                slides = make_schedule(pdf_path)
 
-            state["last_source_check"] = now
-            state_changed = True
+                # Проверяем, изменилось ли расписание
+                for slide in slides:
+                    idx = slide["number"] - 1
+                    if state["latest"]["slides"][idx].get("hash") != slide["hash"]:
+                        schedule_changed = True
+
+                if schedule_changed:
+                    print("Расписание изменилось.")
+                else:
+                    print("Расписание не изменилось.")
+
+                # Загружаем все 5 слайдов в кэш Telegram (в высоком JPG)
+                if warmup_cache(state, slides):
+                    state_changed = True
+
+                # Рассылаем тем, кому нужно новое расписание
+                broadcast(state, slides, schedule_changed)
+
+                # Сохраняем дату со страницы
+                if page_date:
+                    state["latest"]["source_date"] = page_date
+
+                state["last_source_check"] = now
+                state_changed = True
 
         except Exception as e:
             print(f"Ошибка расписания: {e}")
